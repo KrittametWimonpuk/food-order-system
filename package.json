@@ -8,7 +8,8 @@
     "test:e2e": "node tests/e2e.js",
     "dev": "node tests/dev-server.js 8080 --now \"2026-09-25 09:00\"",
     "lint": "for f in src/*.gs; do cp \"$f\" /tmp/$(basename \"$f\" .gs).js && node --check /tmp/$(basename \"$f\" .gs).js || exit 1; done",
-    "push": "clasp push"
+    "push": "clasp push",
+    "bundle": "node scripts/bundle.js"
   },
   "license": "UNLICENSED"
 }

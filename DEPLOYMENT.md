@@ -18,7 +18,15 @@
 
 ## 3. เพิ่ม Source Code
 
-### วิธี A — คัดลอกผ่าน Editor
+### วิธี A (แนะนำ) — วางไฟล์เดียว `dist/Code.gs`
+1. Project Settings (⚙️) → ติ๊ก **Show "appsscript.json" manifest file in editor** แล้ววางเนื้อหาจาก `src/appsscript.json`
+2. **ลบไฟล์ .gs อื่นทั้งหมด** ในโปรเจกต์ (ถ้าเคยวางไว้) ให้เหลือ `Code.gs` ไฟล์เดียว
+3. เปิด `dist/Code.gs` บน GitHub → **Raw** → Ctrl+A, Ctrl+C → วางใน `Code.gs` → Save
+   (ไฟล์นี้คือ backend ทั้ง 21 ไฟล์รวมกัน — สร้างด้วย `npm run bundle`)
+4. สร้างไฟล์ **HTML** 8 ไฟล์ (`+` → HTML) ชื่อ: `index, styles, components, scripts, login, employee, kitchen, admin` แล้ววางเนื้อหาจาก `src/` ให้ตรงชื่อ
+5. ตรวจ: dropdown ฟังก์ชัน (เมื่อเปิด `Code.gs`) ต้องมี `setupDatabase`
+
+### วิธี A2 — คัดลอกทีละไฟล์ผ่าน Editor
 1. Project Settings (⚙️) → ติ๊ก **Show "appsscript.json" manifest file in editor**
 2. เปิด `appsscript.json` แล้ววางเนื้อหาจาก `src/appsscript.json`
 3. สร้างไฟล์ **Script** (`+` → Script) ตามชื่อ แล้ววางเนื้อหาให้ครบทุกไฟล์ (ไม่ต้องพิมพ์ `.gs`):
