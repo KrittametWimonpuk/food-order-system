@@ -140,6 +140,7 @@ function getPublicAppInfo() {
     maxQtyPerOrder: cfgInt('MAX_QTY_PER_ORDER', 3),
     allowEdit: cfgBool('ALLOW_EDIT'),
     allowCancel: cfgBool('ALLOW_CANCEL'),
+    allowMultipleOrders: cfgBool('ALLOW_MULTIPLE_ORDERS'),
     pinMinLength: Math.max(4, cfgInt('PIN_MIN_LENGTH', 4)),
     departments: cfgList('DEPARTMENTS'),
     categories: cfgList('MENU_CATEGORIES')

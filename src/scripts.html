@@ -1,0 +1,337 @@
+<script>
+/* ==========================================================================
+   scripts.html — application core: session, routing, desktop shell
+   ========================================================================== */
+'use strict';
+
+var App = {
+  state: { user: null, app: null, mode: null },
+  root: null,
+
+  /** Entry point. */
+  boot: function () {
+    App.root = document.getElementById('app');
+    Api.onSessionExpired = function (err) {
+      App.clearSession();
+      showToast(err.message || 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่', 'warning');
+      Login.render();
+    };
+    Api.onPinChangeRequired = function () { App.showChangePin(true); };
+    Api.token = Store.get('token') || Store.get('token', true);
+    if (!Api.token) { Login.render(); return; }
+    App.root.innerHTML = '<div class="login-screen"><div class="loading-box"><div class="spinner"></div><span>กำลังเข้าสู่ระบบ...</span></div></div>';
+    apiCall('auth.me').then(function (d) {
+      App.state.user = d.user;
+      App.state.app = d.app;
+      syncServerTime(d.app.serverTime);
+      App.route();
+    }).catch(function (e) {
+      if (!e.handled) { App.clearSession(); Login.render(e.code === 'NETWORK_ERROR' ? e.message : ''); }
+    });
+  },
+
+  /** Called after a successful login. */
+  onLogin: function (data, remember) {
+    Api.token = data.token;
+    Store.remove('token');
+    Store.set('token', data.token, !remember);
+    App.state.user = data.user;
+    return apiCall('auth.me').then(function (d) {
+      App.state.app = d.app;
+      App.state.user = d.user;
+      App.route();
+    });
+  },
+
+  clearSession: function () {
+    Api.token = null;
+    Store.remove('token');
+    Store.remove('mode');
+    Employee.resetCart && Employee.resetCart();
+    App.state.user = null;
+    Desk.stop();
+    Employee.stop && Employee.stop();
+  },
+
+  /** Logout with confirmation. */
+  logout: function (skipConfirm) {
+    var go = function () {
+      var t = Api.token;
+      if (t) apiCall('auth.logout').catch(function () { /* ignore */ });
+      App.clearSession();
+      showToast('ออกจากระบบแล้ว', 'success');
+      Login.render();
+    };
+    if (skipConfirm) { go(); return; }
+    confirmModal('ต้องการออกจากระบบหรือไม่?', { title: 'ออกจากระบบ', okText: 'ออกจากระบบ', icon: 'logout' }).then(function (ok) { if (ok) go(); });
+  },
+
+  /** Decides which UI to show for the current user. */
+  route: function () {
+    var u = App.state.user;
+    if (!u) { Login.render(); return; }
+    if (u.must_change_pin) { App.showChangePin(true); return; }
+    var initial = (window.INITIAL_PAGE || '').toLowerCase();
+    window.INITIAL_PAGE = '';
+    var saved = Store.get('mode', true);
+    if (u.role === 'EMPLOYEE' || initial === 'order' || (saved === 'mobile' && !initial)) { App.switchMode('mobile'); return; }
+    App.switchMode('desk', initial);
+  },
+
+  /** Switches between the mobile ordering app and the desktop dashboard. */
+  switchMode: function (mode, page) {
+    var u = App.state.user;
+    if (mode === 'desk' && u.role === 'EMPLOYEE') mode = 'mobile';
+    Store.set('mode', mode, true);
+    App.state.mode = mode;
+    Desk.stop();
+    Employee.stop && Employee.stop();
+    document.body.classList.toggle('mode-mobile', mode === 'mobile');
+    if (mode === 'mobile') Employee.start();
+    else Desk.start(page);
+  },
+
+  /** Change PIN screen (forced on first login) or modal (voluntary). */
+  showChangePin: function (forced) {
+    var min = (App.state.app && App.state.app.pinMinLength) || 4;
+    var form = '<form id="pinForm" novalidate>' +
+      '<div class="form-group"><label class="form-label" for="pinCur">PIN ปัจจุบัน</label><input class="form-control pin-input" id="pinCur" type="password" inputmode="numeric" autocomplete="current-password" maxlength="8" required></div>' +
+      '<div class="form-group"><label class="form-label" for="pinNew">PIN ใหม่</label><input class="form-control pin-input" id="pinNew" type="password" inputmode="numeric" autocomplete="new-password" maxlength="8" required><div class="form-hint">ตัวเลข ' + min + '-8 หลัก ห้ามเรียงกันหรือซ้ำกันทั้งหมด</div></div>' +
+      '<div class="form-group"><label class="form-label" for="pinNew2">ยืนยัน PIN ใหม่</label><input class="form-control pin-input" id="pinNew2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="8" required></div>' +
+      '<div class="field-error" id="pinErr" role="alert"></div></form>';
+    var submit = function (btn) {
+      var cur = $('#pinCur').value.trim(), n1 = $('#pinNew').value.trim(), n2 = $('#pinNew2').value.trim();
+      var errEl = $('#pinErr');
+      errEl.textContent = '';
+      if (!/^\d+$/.test(n1) || n1.length < min || n1.length > 8) { errEl.textContent = 'PIN ใหม่ต้องเป็นตัวเลข ' + min + '-8 หลัก'; return Promise.resolve(false); }
+      if (n1 !== n2) { errEl.textContent = 'PIN ใหม่และการยืนยันไม่ตรงกัน'; return Promise.resolve(false); }
+      return apiCall('auth.changePin', { currentPin: cur, newPin: n1 }).then(function () {
+        showToast('เปลี่ยน PIN เรียบร้อยแล้ว', 'success');
+        App.state.user.must_change_pin = false;
+        return true;
+      }).catch(function (e) { errEl.textContent = e.message; return false; });
+    };
+    if (forced) {
+      Desk.stop();
+      App.root.innerHTML = '<div class="login-screen"><div class="card login-card"><div class="login-logo">' + icon('key') + '</div>' +
+        '<h1 class="login-title">ตั้ง PIN ใหม่</h1><p class="login-sub">กรุณาเปลี่ยน PIN ก่อนเริ่มใช้งานระบบ</p>' + form +
+        '<button class="btn btn-primary btn-lg btn-block" id="pinSave">' + icon('check') + '<span>บันทึก PIN ใหม่</span></button>' +
+        '<button class="btn btn-ghost btn-block mt-8" id="pinLogout">' + icon('logout') + '<span>ออกจากระบบ</span></button></div></div>';
+      var btn = $('#pinSave');
+      var run = function (e) { if (e) e.preventDefault(); guard(btn, function () { return submit(btn).then(function (ok) { if (ok) App.route(); }); }); };
+      btn.onclick = run;
+      $('#pinForm').onsubmit = run;
+      $('#pinLogout').onclick = function () { App.logout(true); };
+      setTimeout(function () { $('#pinCur').focus(); }, 50);
+      return;
+    }
+    openModal({
+      title: 'เปลี่ยน PIN', body: form, sheet: true,
+      actions: [{ text: 'ยกเลิก' }, { text: 'บันทึก', cls: 'btn-primary', onClick: function (m, b) { return submit(b).then(function (ok) { if (ok) m.close(); }); } }]
+    });
+  }
+};
+
+/* ==========================================================================
+   Desk — desktop / tablet shell for KITCHEN, ADMIN and VIEWER
+   ========================================================================== */
+var Desk = {
+  pages: {},
+  current: null,
+  timers: [],
+  clockTimer: null,
+  active: false,
+
+  /**
+   * Registers a page.
+   * @param {string} key
+   * @param {{title:string, icon:string, roles:string[], render:Function(el, params), group?:string}} def
+   */
+  register: function (key, def) { Desk.pages[key] = def; },
+
+  /** Sidebar definition per role (order matters). */
+  navFor: function (role) {
+    var nav = {
+      KITCHEN: [
+        { group: 'ครัว' }, 'k-dashboard', 'k-orders', 'k-pickup', 'k-summary', 'k-daily',
+        { group: 'อื่นๆ' }, 'reports', 'k-settings'
+      ],
+      ADMIN: [
+        { group: 'ภาพรวม' }, 'a-dashboard', 'k-dashboard', 'k-pickup', 'k-summary',
+        { group: 'จัดการ' }, 'menu', 'daily', 'meals', 'employees', 'orders',
+        { group: 'รายงานและระบบ' }, 'reports', 'line', 'audit', 'logs', 'settings', 'backup'
+      ],
+      VIEWER: [{ group: 'ภาพรวม' }, 'a-dashboard', 'reports']
+    };
+    return nav[role] || [];
+  },
+
+  defaultPage: function (role) { return role === 'KITCHEN' ? 'k-dashboard' : 'a-dashboard'; },
+
+  pageAllowed: function (key) {
+    var p = Desk.pages[key];
+    var u = App.state.user;
+    if (!p || !u) return false;
+    return Desk.navFor(u.role).indexOf(key) >= 0 || (p.hiddenFor && p.roles.indexOf(u.role) >= 0);
+  },
+
+  start: function (page) {
+    var u = App.state.user;
+    Desk.active = true;
+    var collapsed = Store.get('sidebar') === 'collapsed';
+    var initials = String(u.name || '?').trim().charAt(0);
+    var navHtml = Desk.navFor(u.role).map(function (item) {
+      if (typeof item === 'object') return '<div class="sidebar-group">' + esc(item.group) + '</div>';
+      var p = Desk.pages[item];
+      if (!p) return '';
+      return '<button class="nav-item" data-page="' + item + '" title="' + esc(p.title) + '">' + icon(p.icon) + '<span class="nav-label">' + esc(p.navLabel || p.title) + '</span></button>';
+    }).join('');
+    App.root.innerHTML =
+      '<div class="shell' + (collapsed ? ' collapsed' : '') + '" id="shell">' +
+      '<aside class="sidebar" aria-label="เมนูหลัก">' +
+      '<div class="sidebar-logo"><div class="logo-box">' + icon('bowl') + '</div><div class="logo-text"><b>ระบบจองอาหาร</b><span>' + esc(App.state.app.companyName) + '</span></div></div>' +
+      '<nav class="sidebar-nav">' + navHtml +
+      '<div class="sidebar-group">บัญชี</div>' +
+      '<button class="nav-item" id="navOrderMode" title="สั่งอาหารของฉัน">' + icon('cart') + '<span class="nav-label">สั่งอาหารของฉัน</span></button>' +
+      '<button class="nav-item" id="navLogout" title="ออกจากระบบ">' + icon('logout') + '<span class="nav-label">ออกจากระบบ</span></button>' +
+      '</nav>' +
+      '<div class="sidebar-foot"><div class="sidebar-user"><div class="avatar">' + esc(initials) + '</div><div class="u-meta"><b>' + esc(u.name) + '</b><span>' + esc(u.employee_code) + ' · ' + esc(ROLE_TH[u.role] || u.role) + '</span></div></div></div>' +
+      '</aside><div class="sidebar-backdrop" id="sbBackdrop"></div>' +
+      '<div class="main"><header class="topbar">' +
+      '<button class="btn btn-ghost btn-icon mobile-topbar-btn" id="sbOpen" aria-label="เปิดเมนู">' + icon('menu') + '</button>' +
+      '<button class="btn btn-ghost btn-icon collapse-btn" id="sbCollapse" aria-label="ย่อ/ขยายเมนู">' + icon('sidebar') + '</button>' +
+      '<h1 id="pageTitle"></h1>' +
+      '<div class="tb-meta"><span class="tb-date">' + icon('calendar', 'icon-sm') + '<span id="tbDate"></span></span><span class="tb-clock">' + icon('clock', 'icon-sm') + '<span id="tbClock"></span></span></div>' +
+      '</header><main class="content" id="content" tabindex="-1"></main></div></div>';
+    $all('.nav-item[data-page]').forEach(function (b) { b.onclick = function () { Desk.go(b.dataset.page); }; });
+    $('#navLogout').onclick = function () { App.logout(); };
+    $('#navOrderMode').onclick = function () { App.switchMode('mobile'); };
+    $('#sbCollapse').onclick = function () {
+      var s = $('#shell');
+      s.classList.toggle('collapsed');
+      Store.set('sidebar', s.classList.contains('collapsed') ? 'collapsed' : 'open');
+    };
+    $('#sbOpen').onclick = function () { $('#shell').classList.add('nav-open'); };
+    $('#sbBackdrop').onclick = function () { $('#shell').classList.remove('nav-open'); };
+    Desk.tickClock();
+    Desk.clockTimer = setInterval(Desk.tickClock, 1000);
+    var map = { kitchen: 'k-dashboard', pickup: 'k-pickup', orders: u.role === 'ADMIN' ? 'orders' : 'k-orders', admin: 'a-dashboard', reports: 'reports', summary: 'k-summary' };
+    var target = map[page] || page;
+    Desk.go(Desk.pageAllowed(target) ? target : Desk.defaultPage(u.role));
+  },
+
+  stop: function () {
+    Desk.clearTimers();
+    if (Desk.clockTimer) clearInterval(Desk.clockTimer);
+    Desk.clockTimer = null;
+    Desk.active = false;
+  },
+
+  tickClock: function () {
+    var n = serverNow();
+    var p = bkkParts(n);
+    var c = $('#tbClock'), d = $('#tbDate');
+    if (c) c.textContent = pad2(p.H) + ':' + pad2(p.M) + ':' + pad2(p.S);
+    if (d) d.textContent = formatDate(n);
+  },
+
+  /** Registers an interval that is cleared on navigation. */
+  every: function (ms, fn) {
+    var t = setInterval(function () { if (!document.hidden) fn(); }, ms);
+    Desk.timers.push(t);
+    return t;
+  },
+  clearTimers: function () { Desk.timers.forEach(clearInterval); Desk.timers = []; },
+
+  /** Navigates to a page. */
+  go: function (key, params) {
+    if (!Desk.pageAllowed(key)) { showToast('คุณไม่มีสิทธิ์เข้าถึงหน้านี้', 'error'); return; }
+    Desk.clearTimers();
+    vizTipHide();
+    var p = Desk.pages[key];
+    Desk.current = key;
+    $all('.nav-item[data-page]').forEach(function (b) {
+      var on = b.dataset.page === key;
+      b.classList.toggle('active', on);
+      if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+    $('#pageTitle').textContent = p.title;
+    $('#shell').classList.remove('nav-open');
+    var el = $('#content');
+    el.innerHTML = skeleton(3);
+    el.scrollTop = 0;
+    window.scrollTo(0, 0);
+    try { p.render(el, params || {}); } catch (e) { el.innerHTML = errorBlock(e); console.error(e); }
+  },
+
+  /** Re-renders the current page. */
+  reload: function () { if (Desk.current) Desk.go(Desk.current); }
+};
+
+/* ---------- Shared desk widgets ---------- */
+/** KPI card html. */
+function kpiCard(label, value, iconName, tone, sub) {
+  return '<div class="card kpi-card"><div class="kpi-icon ' + (tone || '') + '">' + icon(iconName) + '</div><div><div class="kpi-label">' + esc(label) + '</div><div class="kpi-value">' + esc(value) + '</div>' + (sub ? '<div class="kpi-sub">' + esc(sub) + '</div>' : '') + '</div></div>';
+}
+/** Window selector options html. */
+function windowOptions(windows, selectedId, withAll) {
+  var s = withAll ? '<option value="ALL"' + (selectedId === 'ALL' ? ' selected' : '') + '>ทุกมื้อของวัน</option>' : '';
+  return s + windows.map(function (w) {
+    return '<option value="' + esc(w.window_id) + '"' + (w.window_id === selectedId ? ' selected' : '') + '>' + esc(w.meal_th) + ' · ' + esc(WINDOW_STATUS_TH[w.status] || w.status) + '</option>';
+  }).join('');
+}
+/** Meal status bar shown at the top of kitchen pages. */
+function mealStatusBar(date, w) {
+  if (!w) return '<div class="card meal-status-bar"><div class="msb-item">' + icon('calendar') + '<b>' + esc(formatDate(date)) + '</b></div><span class="sep"></span><span class="muted">ยังไม่มีมื้ออาหารในวันนี้</span></div>';
+  var closeTxt = w.status === 'OPEN' ? 'ปิดรับ ' + formatTime(w.close_at) : (w.status === 'DRAFT' ? 'เปิดรับ ' + formatTime(w.open_at) : 'ปิดรับแล้ว ' + formatTime(w.close_at));
+  return '<div class="card meal-status-bar">' +
+    '<div class="msb-item">' + icon('calendar') + '<b>' + esc(formatDate(w.date)) + '</b></div><span class="sep"></span>' +
+    '<div class="msb-item">' + mealIcon(w.meal) + '<b>' + esc(w.meal_th) + '</b> ' + renderStatus(w.status) + '</div><span class="sep"></span>' +
+    '<div class="msb-item">' + icon('clock') + '<span>' + esc(closeTxt) + '</span></div><span class="sep"></span>' +
+    '<div class="msb-item">' + icon('package') + '<span>รับอาหาร ' + esc(formatTime(w.pickup_start, true)) + '–' + esc(formatTime(w.pickup_end)) + '</span></div></div>';
+}
+/** Simple pager html + binding. */
+function pagerHtml(page, totalPages, total) {
+  if (totalPages <= 1) return '<div class="pagination"><span class="muted text-sm">ทั้งหมด ' + formatNumber(total) + ' รายการ</span></div>';
+  return '<div class="pagination"><span class="muted text-sm">ทั้งหมด ' + formatNumber(total) + ' รายการ · หน้า ' + page + '/' + totalPages + '</span><div class="row">' +
+    '<button class="btn btn-outline btn-sm" data-pg="' + (page - 1) + '"' + (page <= 1 ? ' disabled' : '') + '>' + icon('chevronLeft', 'icon-sm') + '<span>ก่อนหน้า</span></button>' +
+    '<button class="btn btn-outline btn-sm" data-pg="' + (page + 1) + '"' + (page >= totalPages ? ' disabled' : '') + '><span>ถัดไป</span>' + icon('chevronRight', 'icon-sm') + '</button></div></div>';
+}
+function bindPager(root, fn) { $all('[data-pg]', root).forEach(function (b) { b.onclick = function () { fn(Number(b.dataset.pg)); }; }); }
+/** Builds a form from field definitions and returns its HTML. */
+function formField(f) {
+  var id = 'f_' + f.name;
+  var req = f.required ? ' required' : '';
+  var val = f.value === undefined || f.value === null ? '' : f.value;
+  var input;
+  if (f.type === 'select') {
+    input = '<select class="form-control" id="' + id + '" name="' + esc(f.name) + '"' + req + '>' + (f.options || []).map(function (o) {
+      var ov = typeof o === 'object' ? o.value : o, ol = typeof o === 'object' ? o.label : o;
+      return '<option value="' + esc(ov) + '"' + (String(ov) === String(val) ? ' selected' : '') + '>' + esc(ol) + '</option>';
+    }).join('') + '</select>';
+  } else if (f.type === 'textarea') {
+    input = '<textarea class="form-control" id="' + id + '" name="' + esc(f.name) + '" maxlength="' + (f.max || 300) + '"' + req + '>' + esc(val) + '</textarea>';
+  } else if (f.type === 'switch') {
+    input = '<label class="switch"><input type="checkbox" id="' + id + '" name="' + esc(f.name) + '"' + (val === true || val === 'TRUE' ? ' checked' : '') + '><span class="track"></span><span>' + esc(f.switchLabel || '') + '</span></label>';
+  } else {
+    input = '<input class="form-control" id="' + id + '" name="' + esc(f.name) + '" type="' + (f.type || 'text') + '" value="' + esc(val) + '"' + (f.placeholder ? ' placeholder="' + esc(f.placeholder) + '"' : '') +
+      (f.min !== undefined ? ' min="' + f.min + '"' : '') + (f.step ? ' step="' + f.step + '"' : '') + (f.max && f.type !== 'number' ? ' maxlength="' + f.max + '"' : '') + (f.max && f.type === 'number' ? ' max="' + f.max + '"' : '') +
+      (f.inputmode ? ' inputmode="' + f.inputmode + '"' : '') + (f.readonly ? ' readonly' : '') + (f.disabled ? ' disabled' : '') + req + '>';
+  }
+  return '<div class="form-group' + (f.span2 ? ' span-2' : '') + '"><label class="form-label" for="' + id + '">' + esc(f.label) + (f.required ? ' <span style="color:var(--danger)">*</span>' : '') + '</label>' + input + (f.hint ? '<div class="form-hint">' + esc(f.hint) + '</div>' : '') + '</div>';
+}
+/** Reads form values by name from a root element. */
+function readForm(root) {
+  var out = {};
+  $all('[name]', root).forEach(function (el) {
+    out[el.name] = el.type === 'checkbox' ? el.checked : el.value.trim();
+  });
+  return out;
+}
+/** Validates required fields; returns false and focuses the first empty one. */
+function checkRequired(root) {
+  var bad = $all('[required]', root).filter(function (el) { return el.type !== 'checkbox' && !String(el.value || '').trim(); });
+  if (bad.length) { bad[0].focus(); showToast('กรุณากรอกข้อมูลให้ครบถ้วน', 'warning'); return false; }
+  return true;
+}
+</script>

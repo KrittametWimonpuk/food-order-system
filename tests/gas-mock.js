@@ -26,9 +26,11 @@ const RealDate = Date;
 
 function createGasEnv(options = {}) {
   let nowMs = null; // null = real time
+  let flowStart = null; // when set, the mock clock advances with real time
+  const current = () => (nowMs === null ? RealDate.now() : (flowStart === null ? nowMs : nowMs + (RealDate.now() - flowStart)));
   class FakeDate extends RealDate {
-    constructor(...a) { if (a.length === 0) super(nowMs === null ? RealDate.now() : nowMs); else super(...a); }
-    static now() { return nowMs === null ? RealDate.now() : nowMs; }
+    constructor(...a) { if (a.length === 0) super(current()); else super(...a); }
+    static now() { return current(); }
   }
 
   /* ---------------- Utilities ---------------- */
@@ -333,7 +335,10 @@ function createGasEnv(options = {}) {
     triggers: () => triggers,
     root,
     /** Sets the mock clock to a Bangkok local time "yyyy-MM-dd HH:mm[:ss]" (or null for real time). */
-    setNow(local) { nowMs = local === null ? null : new RealDate(local.replace(' ', 'T') + (local.length === 16 ? ':00' : '') + '+07:00').getTime(); },
+    setNow(local, flowing) {
+      nowMs = local === null ? null : new RealDate(local.replace(' ', 'T') + (local.length === 16 ? ':00' : '') + '+07:00').getTime();
+      flowStart = flowing ? RealDate.now() : null;
+    },
     /** Resets per-execution memory (simulates a new Apps Script execution). */
     newExecution() {
       vm.runInContext('DB_STATE.memo = {}; DB_STATE.sheets = {}; DB_STATE.headers = {}; DB_STATE.ss = null; CONFIG_MEMO = null; REQUEST_CTX.user = null;', context);

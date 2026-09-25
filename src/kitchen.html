@@ -1,0 +1,414 @@
+<script>
+/* ==========================================================================
+   kitchen.html — Kitchen screens (desktop / tablet)
+   07 Kitchen Dashboard · 08 Order List (+ 15 Admin Order Management) · 09 Food Pickup
+   Final Summary · Kitchen settings
+   ========================================================================== */
+'use strict';
+
+/** Client-side mirror of allowed transitions (UX only; the server re-validates). */
+var CLIENT_TRANSITIONS = {
+  KITCHEN: { CONFIRMED: ['PREPARING', 'READY', 'PICKED_UP', 'CANCELLED', 'NO_SHOW'], PREPARING: ['READY', 'PICKED_UP', 'CANCELLED', 'NO_SHOW'], READY: ['PICKED_UP', 'NO_SHOW', 'PREPARING'], NO_SHOW: ['PICKED_UP'], PICKED_UP: [], CANCELLED: [] },
+  ADMIN: { CONFIRMED: ['PREPARING', 'READY', 'PICKED_UP', 'CANCELLED', 'NO_SHOW'], PREPARING: ['CONFIRMED', 'READY', 'PICKED_UP', 'CANCELLED', 'NO_SHOW'], READY: ['PREPARING', 'PICKED_UP', 'NO_SHOW', 'CANCELLED'], NO_SHOW: ['PICKED_UP', 'READY'], PICKED_UP: ['READY'], CANCELLED: [] }
+};
+var NEXT_STEP = { CONFIRMED: { to: 'PREPARING', text: 'เริ่มเตรียม', cls: 'btn-warning' }, PREPARING: { to: 'READY', text: 'พร้อมรับ', cls: 'btn-primary' }, READY: { to: 'PICKED_UP', text: 'รับแล้ว', cls: 'btn-success' } };
+function canWrite() { var r = App.state.user.role; return r === 'KITCHEN' || r === 'ADMIN'; }
+function itemsText(o) { return o.items.map(function (i) { return esc(i.name) + ' × ' + i.qty + (i.note ? ' <span class="muted">(' + esc(i.note) + ')</span>' : ''); }).join('<br>'); }
+
+/* ---------------- 07 Kitchen Dashboard ---------------- */
+Desk.register('k-dashboard', {
+  title: 'Kitchen Dashboard', navLabel: 'หน้าหลักครัว', icon: 'home', roles: ['KITCHEN', 'ADMIN'],
+  render: function (el, params) {
+    var state = { window_id: params.window_id || '' };
+    var load = function (silent) {
+      return apiCall('kitchen.dashboard', { window_id: state.window_id }).then(function (d) {
+        if (Desk.current !== 'k-dashboard') return;
+        state.window_id = d.window ? d.window.window_id : '';
+        var k = d.kpi;
+        var w = d.window;
+        el.innerHTML = mealStatusBar(d.date, w) +
+          '<div class="page-head"><div class="row">' + (d.windows.length > 1 ? '<select class="form-control form-control-sm" id="kdWin" aria-label="เลือกมื้อ" style="width:auto">' + windowOptions(d.windows, state.window_id) + '</select>' : '') +
+          '<span class="muted text-sm">อัปเดตล่าสุด ' + esc(formatTime(d.serverTime)) + ' · รีเฟรชอัตโนมัติทุก 30 วินาที</span></div>' +
+          '<div class="ph-actions">' + (canWrite() && w ? '<button class="btn btn-outline btn-sm" id="kdBulkPrep">' + icon('fire', 'icon-sm') + '<span>เริ่มเตรียมทั้งหมด</span></button><button class="btn btn-outline btn-sm" id="kdBulkReady">' + icon('check', 'icon-sm') + '<span>พร้อมรับทั้งหมด</span></button>' : '') +
+          '<button class="btn btn-soft btn-sm" id="kdRefresh">' + icon('refresh', 'icon-sm') + '<span>รีเฟรช</span></button></div></div>' +
+          '<div class="kpi-grid">' + kpiCard('จำนวน Order', formatNumber(k.orders), 'clipboard', '', k.cancelled ? 'ยกเลิก ' + k.cancelled : '') + kpiCard('จำนวนกล่อง', formatNumber(k.qty), 'package', 'navy') +
+          kpiCard('รับแล้ว', formatNumber(k.picked_up), 'checkCircle', 'success', k.orders ? Math.round(k.picked_up / k.orders * 100) + '%' : '') + kpiCard('เหลือ', formatNumber(k.pending), 'clock', 'warning', k.no_show ? 'ไม่มารับ ' + k.no_show : '') + '</div>' +
+          '<div class="grid-2"><div class="card"><div class="card-header"><div class="card-title">' + icon('chart') + 'จำนวนตามเมนู</div><span class="card-sub">กล่อง</span></div><div class="card-body">' +
+          hbarChart(d.byMenu.map(function (m) { return { label: m.name, value: m.qty, sub: m.orders + ' Order' }; }), { unit: 'กล่อง', label: 'จำนวนกล่องตามเมนู', emptyTitle: 'ยังไม่มีรายการสั่งอาหาร' }) + '</div></div>' +
+          '<div class="card"><div class="card-header"><div class="card-title">' + icon('pie') + 'สัดส่วนตามแผนก</div></div><div class="card-body">' +
+          donutChart(d.byDepartment.map(function (x) { return { label: x.department, value: x.qty }; }), { centerLabel: 'กล่อง', label: 'สัดส่วนกล่องตามแผนก', emptyTitle: 'ยังไม่มีรายการสั่งอาหาร' }) + '</div></div></div>' +
+          '<div class="grid-2 mt-16"><div class="card"><div class="card-header"><div class="card-title">' + icon('box') + 'สต็อกเมนูวันนี้</div>' + (canWrite() ? '<button class="btn btn-ghost btn-sm" id="kdDaily">จัดการ' + icon('chevronRight', 'icon-sm') + '</button>' : '') + '</div><div class="table-wrap mt-8">' +
+          (d.stock.length ? '<table class="table"><thead><tr><th>เมนู</th><th class="num">จำนวนสูงสุด</th><th class="num">ขายแล้ว</th><th class="num">เหลือ</th><th>สถานะ</th></tr></thead><tbody>' + d.stock.map(function (s) {
+            return '<tr><td class="fw-600">' + esc(s.name) + '</td><td class="num">' + s.stock_limit + '</td><td class="num">' + s.sold_qty + '</td><td class="num fw-700">' + s.remaining + '</td><td>' + renderStatus(s.status) + '</td></tr>';
+          }).join('') + '</tbody></table>' : emptyState('วันนี้ยังไม่มีเมนูอาหาร', '', 'bowl')) + '</div></div>' +
+          '<div class="card"><div class="card-header"><div class="card-title">' + icon('history') + 'Order ล่าสุด</div><button class="btn btn-ghost btn-sm" id="kdAll">ดูทั้งหมด' + icon('chevronRight', 'icon-sm') + '</button></div><div class="card-body" style="padding-top:8px">' +
+          (d.recent.length ? d.recent.map(function (o) {
+            return '<div class="row-between" style="padding:9px 0;border-bottom:1px solid var(--border-2)"><div class="grow"><div class="fw-600">' + esc(o.employee_name) + ' <span class="muted text-sm">' + esc(o.employee_code) + '</span></div><div class="text-sm muted">' + o.items.map(function (i) { return esc(i.name) + ' ×' + i.qty; }).join(', ') + '</div></div><div class="text-right"><div class="text-sm muted">' + esc(formatTime(o.created_at)) + '</div>' + renderStatus(o.status) + '</div></div>';
+          }).join('') : emptyState('ยังไม่มีรายการสั่งอาหาร', '', 'clipboard')) + '</div></div></div>';
+        bindVizTips(el);
+        var sel = $('#kdWin'); if (sel) sel.onchange = function () { state.window_id = sel.value; el.innerHTML = skeleton(3); load(); };
+        $('#kdRefresh').onclick = function () { guard(this, function () { return load(); }); };
+        var all = $('#kdAll'); if (all) all.onclick = function () { Desk.go(App.state.user.role === 'ADMIN' ? 'orders' : 'k-orders', { window_id: state.window_id }); };
+        var dm = $('#kdDaily'); if (dm) dm.onclick = function () { Desk.go(App.state.user.role === 'ADMIN' ? 'daily' : 'k-daily', { window_id: state.window_id }); };
+        var bp = $('#kdBulkPrep'); if (bp) bp.onclick = function () { bulkByStatus(bp, state.window_id, 'CONFIRMED', 'PREPARING', load); };
+        var br = $('#kdBulkReady'); if (br) br.onclick = function () { bulkByStatus(br, state.window_id, 'PREPARING', 'READY', load); };
+      }).catch(function (e) {
+        if (e.handled || silent) return;
+        el.innerHTML = errorBlock(e, 'kdRetry');
+        var r = $('#kdRetry'); if (r) r.onclick = function () { load(); };
+      });
+    };
+    load();
+    Desk.every(30000, function () { load(true); });
+  }
+});
+
+/** Bulk-moves every order of a window from one status to the next. */
+function bulkByStatus(btn, windowId, from, to, after) {
+  return guard(btn, function () {
+    return apiCall('kitchen.orders', { window_id: windowId, status: from, pageSize: 200 }).then(function (d) {
+      if (!d.rows.length) { showToast('ไม่มีรายการสถานะ "' + ORDER_STATUS_TH[from] + '"', 'info'); return; }
+      return confirmModal('เปลี่ยน ' + d.rows.length + ' รายการ จาก "' + ORDER_STATUS_TH[from] + '" เป็น "' + ORDER_STATUS_TH[to] + '" ?', { okText: 'ยืนยัน' }).then(function (ok) {
+        if (!ok) return;
+        return apiCall('kitchen.bulkStatus', { order_ids: d.rows.map(function (r) { return r.order_id; }), status: to }, { loading: 'กำลังอัปเดต...' }).then(function (r) {
+          showToast('อัปเดตแล้ว ' + r.updated + ' รายการ' + (r.skipped.length ? ' (ข้าม ' + r.skipped.length + ')' : ''), 'success');
+          return after && after();
+        });
+      });
+    });
+  });
+}
+
+/* ---------------- 08 Kitchen Order List / 15 Admin Order Management ---------------- */
+function OrdersPage(el, params, admin) {
+  var pageKey = admin ? 'orders' : 'k-orders';
+  var state = { date: params.date || '', window_id: params.window_id || '', status: params.status || 'ALL', q: '', department: '', item_id: '', page: 1, selected: {} };
+  el.innerHTML =
+    '<div class="card"><div class="filter-pills" id="olPills" role="tablist" aria-label="กรองสถานะ"></div>' +
+    '<div class="toolbar">' +
+    (admin ? '<input type="date" class="form-control form-control-sm" id="olDate" aria-label="วันที่" style="width:auto">' : '') +
+    '<select class="form-control form-control-sm" id="olWin" aria-label="มื้ออาหาร" style="width:auto"></select>' +
+    '<div class="input-icon search">' + icon('search') + '<input class="form-control form-control-sm" id="olQ" type="search" placeholder="ค้นหา รหัส / ชื่อ / Order / เมนู" aria-label="ค้นหา"></div>' +
+    '<select class="form-control form-control-sm" id="olDept" aria-label="แผนก" style="width:auto"><option value="">ทุกแผนก</option></select>' +
+    '<select class="form-control form-control-sm" id="olMenu" aria-label="เมนู" style="width:auto"><option value="">ทุกเมนู</option></select>' +
+    '<span class="grow"></span>' +
+    (canWrite() ? '<button class="btn btn-outline btn-sm hidden" id="olBulk">' + icon('check', 'icon-sm') + '<span>เปลี่ยนสถานะที่เลือก</span></button>' : '') +
+    '<button class="btn btn-soft btn-sm" id="olRefresh" aria-label="รีเฟรช">' + icon('refresh', 'icon-sm') + '<span>รีเฟรช</span></button></div>' +
+    '<div id="olTable">' + skeleton(4) + '</div></div>';
+  if (admin) { $('#olDate').value = state.date || isoDate(serverNow()); state.date = $('#olDate').value; }
+
+  var load = function (silent) {
+    var payload = { window_id: state.window_id, date: state.date, status: state.status, q: state.q, department: state.department, item_id: state.item_id, page: state.page, pageSize: 50 };
+    return apiCall('kitchen.orders', payload).then(function (d) {
+      if (Desk.current !== pageKey) return;
+      state.window_id = d.window ? d.window.window_id : (state.window_id === 'ALL' ? 'ALL' : '');
+      state.page = d.page;
+      // window select
+      var ws = $('#olWin');
+      ws.innerHTML = d.windows.length ? windowOptions(d.windows, state.window_id, admin) : '<option value="">ไม่มีมื้ออาหาร</option>';
+      // filters
+      var dsel = $('#olDept'), msel = $('#olMenu');
+      dsel.innerHTML = '<option value="">ทุกแผนก</option>' + d.departments.map(function (x) { return '<option' + (x === state.department ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('');
+      msel.innerHTML = '<option value="">ทุกเมนู</option>' + d.menus.map(function (m) { return '<option value="' + esc(m.item_id) + '"' + (m.item_id === state.item_id ? ' selected' : '') + '>' + esc(m.name) + '</option>'; }).join('');
+      // pills
+      var pills = [['ALL', 'ทั้งหมด'], ['CONFIRMED', 'ยืนยันแล้ว'], ['PREPARING', 'กำลังเตรียม'], ['READY', 'พร้อมรับ'], ['PICKED_UP', 'รับแล้ว'], ['CANCELLED', 'ยกเลิก'], ['NO_SHOW', 'ไม่มารับ']];
+      $('#olPills').innerHTML = pills.map(function (p) {
+        return '<button class="pill' + (state.status === p[0] ? ' active' : '') + '" role="tab" aria-selected="' + (state.status === p[0]) + '" data-st="' + p[0] + '">' + p[1] + ' <span class="cnt">' + (d.statusCounts[p[0]] || 0) + '</span></button>';
+      }).join('');
+      $all('[data-st]', el).forEach(function (b) { b.onclick = function () { state.status = b.dataset.st; state.page = 1; state.selected = {}; load(); }; });
+      renderTable(d);
+    }).catch(function (e) {
+      if (e.handled || silent) return;
+      $('#olTable').innerHTML = errorBlock(e, 'olRetry');
+      var r = $('#olRetry'); if (r) r.onclick = function () { load(); };
+    });
+  };
+
+  var renderTable = function (d) {
+    var box = $('#olTable');
+    if (!d.rows.length) {
+      box.innerHTML = emptyState(state.q || state.status !== 'ALL' || state.department || state.item_id ? 'ไม่พบรายการที่ตรงกับเงื่อนไข' : 'ยังไม่มีรายการสั่งอาหาร', state.q ? 'ลองเปลี่ยนคำค้นหาหรือตัวกรอง' : '', 'clipboard');
+      updateBulk();
+      return;
+    }
+    var role = App.state.user.role;
+    box.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr>' + (canWrite() ? '<th style="width:36px"><input type="checkbox" id="olAll" aria-label="เลือกทั้งหมด"></th>' : '') +
+      '<th>#</th><th>เวลา</th><th>รหัสพนักงาน</th><th>ชื่อ</th><th>ฝ่าย</th><th>เมนู</th><th class="num">จำนวน</th><th>สถานะ</th><th class="actions">จัดการ</th></tr></thead><tbody>' +
+      d.rows.map(function (o) {
+        var next = NEXT_STEP[o.status];
+        return '<tr class="' + (o.status === 'CANCELLED' ? 'row-dim' : '') + '">' + (canWrite() ? '<td><input type="checkbox" data-sel="' + esc(o.order_id) + '"' + (state.selected[o.order_id] ? ' checked' : '') + ' aria-label="เลือก ' + esc(o.order_no) + '"></td>' : '') +
+          '<td class="muted">' + o.seq + '</td><td class="nowrap">' + esc(formatTime(o.created_at, true)) + (state.window_id === 'ALL' ? '<div class="text-xs muted">' + esc(o.meal_th) + '</div>' : '') + '</td>' +
+          '<td class="mono nowrap">' + esc(o.employee_code) + '</td><td class="nowrap fw-600">' + esc(o.employee_name) + '<div class="text-xs muted mono">' + esc(o.order_no) + '</div></td><td>' + esc(o.department) + '</td>' +
+          '<td class="table-items">' + itemsText(o) + (o.note ? '<div class="text-xs" style="color:var(--warning-700)">📝 ' + esc(o.note) + '</div>' : '') + '</td><td class="num fw-700">' + o.total_qty + '</td><td>' + renderStatus(o.status) + '</td>' +
+          '<td class="actions">' + (canWrite() && next && CLIENT_TRANSITIONS[role === 'ADMIN' ? 'ADMIN' : 'KITCHEN'][o.status].indexOf(next.to) >= 0 ? '<button class="btn ' + next.cls + ' btn-sm" data-next="' + esc(o.order_id) + '" data-to="' + next.to + '" data-ver="' + o.version + '">' + esc(next.text) + '</button>' : '') +
+          '<button class="btn btn-outline btn-sm" data-manage="' + esc(o.order_id) + '">' + (canWrite() ? 'จัดการ' : 'ดู') + '</button></td></tr>';
+      }).join('') + '</tbody></table></div>' + pagerHtml(d.page, d.totalPages, d.total);
+    bindPager(box, function (p) { state.page = p; load(); });
+    $all('[data-next]', box).forEach(function (b) {
+      b.onclick = function () {
+        var to = b.dataset.to;
+        var run = function () { return guard(b, function () { return apiCall('kitchen.setStatus', { order_id: b.dataset.next, status: to, version: Number(b.dataset.ver) }).then(function () { showToast('อัปเดตสถานะเป็น "' + ORDER_STATUS_TH[to] + '"', 'success', 2000); return load(); }); }); };
+        if (to === 'PICKED_UP') confirmModal('ยืนยันว่าพนักงานรับอาหารแล้ว?', { success: true, okText: '✓ รับอาหารแล้ว', icon: 'checkCircle' }).then(function (ok) { if (ok) run(); });
+        else run();
+      };
+    });
+    $all('[data-manage]', box).forEach(function (b) { b.onclick = function () { manageOrder(b.dataset.manage, load); }; });
+    $all('[data-sel]', box).forEach(function (c) { c.onchange = function () { if (c.checked) state.selected[c.dataset.sel] = true; else delete state.selected[c.dataset.sel]; updateBulk(); }; });
+    var all = $('#olAll');
+    if (all) all.onchange = function () { $all('[data-sel]', box).forEach(function (c) { c.checked = all.checked; if (all.checked) state.selected[c.dataset.sel] = true; else delete state.selected[c.dataset.sel]; }); updateBulk(); };
+    updateBulk();
+  };
+
+  var updateBulk = function () {
+    var b = $('#olBulk');
+    if (!b) return;
+    var n = Object.keys(state.selected).length;
+    b.classList.toggle('hidden', !n);
+    $('span', b).textContent = 'เปลี่ยนสถานะที่เลือก (' + n + ')';
+  };
+  var bulk = $('#olBulk');
+  if (bulk) bulk.onclick = function () {
+    var ids = Object.keys(state.selected);
+    var opts = ['PREPARING', 'READY', 'PICKED_UP', 'NO_SHOW'];
+    openModal({
+      title: 'เปลี่ยนสถานะ ' + ids.length + ' รายการ',
+      body: '<div class="stack">' + opts.map(function (s) { return '<label class="check"><input type="radio" name="bulkSt" value="' + s + '"' + (s === 'PREPARING' ? ' checked' : '') + '> ' + renderStatus(s) + '</label>'; }).join('') + '<p class="muted text-sm">รายการที่เปลี่ยนสถานะไม่ได้จะถูกข้าม</p></div>',
+      actions: [{ text: 'ยกเลิก' }, { text: 'ยืนยัน', cls: 'btn-primary', onClick: function (m) {
+        var st = $('input[name=bulkSt]:checked', m.el).value;
+        return apiCall('kitchen.bulkStatus', { order_ids: ids, status: st }).then(function (r) {
+          m.close();
+          showToast('อัปเดตแล้ว ' + r.updated + ' รายการ' + (r.skipped.length ? ' · ข้าม ' + r.skipped.length : ''), 'success');
+          state.selected = {};
+          return load();
+        });
+      } }]
+    });
+  };
+  $('#olWin').onchange = function () { state.window_id = this.value; state.page = 1; state.selected = {}; load(); };
+  if (admin) $('#olDate').onchange = function () { state.date = this.value; state.window_id = ''; state.page = 1; state.selected = {}; load(); };
+  $('#olDept').onchange = function () { state.department = this.value; state.page = 1; load(); };
+  $('#olMenu').onchange = function () { state.item_id = this.value; state.page = 1; load(); };
+  $('#olQ').oninput = debounce(function () { state.q = $('#olQ').value.trim(); state.page = 1; load(); }, 350);
+  $('#olRefresh').onclick = function () { guard(this, function () { return load(); }); };
+  load();
+  Desk.every(30000, function () { if (!ModalStack.length) load(true); });
+}
+Desk.register('k-orders', { title: 'รายการอาหาร', icon: 'list', roles: ['KITCHEN'], render: function (el, p) { OrdersPage(el, p, false); } });
+Desk.register('orders', { title: 'จัดการ Order', icon: 'clipboard', roles: ['ADMIN'], render: function (el, p) { OrdersPage(el, p, true); } });
+
+/** Order detail modal with allowed status transitions + history. */
+function manageOrder(orderId, after) {
+  apiCall('order.get', { order_id: orderId }, { loading: true }).then(function (d) {
+    var o = d.order;
+    var role = App.state.user.role;
+    var allowed = canWrite() ? (CLIENT_TRANSITIONS[role === 'ADMIN' ? 'ADMIN' : 'KITCHEN'][o.status] || []) : [];
+    var body = '<div class="row-between"><div><div class="fw-700 text-lg">' + esc(o.employee_name) + '</div><div class="muted text-sm">' + esc(o.employee_code) + ' · ' + esc(o.department) + '</div></div>' + renderStatus(o.status) + '</div>' +
+      '<div class="detail-list"><div class="summary-row"><span class="muted">เลข Order</span><b class="mono">' + esc(o.order_no) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">มื้อ</span><b>' + esc(o.meal_th) + ' · ' + esc(formatDate(o.order_date)) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">สั่งเมื่อ</span><b>' + esc(formatDateTime(o.created_at)) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">รายการ</span><b class="text-right">' + itemsText(o) + '</b></div>' +
+      (o.note ? '<div class="summary-row"><span class="muted">หมายเหตุ</span><b>' + esc(o.note) + '</b></div>' : '') +
+      '<div class="summary-row"><span class="muted">ยอดรวม</span><b>' + o.total_qty + ' กล่อง · ' + formatMoney(o.total_amount) + '</b></div>' +
+      (o.picked_up_at ? '<div class="summary-row"><span class="muted">รับอาหาร</span><b>' + esc(formatDateTime(o.picked_up_at)) + ' โดย ' + esc(o.picked_up_by) + '</b></div>' : '') +
+      (o.cancelled_at ? '<div class="summary-row"><span class="muted">ยกเลิก</span><b>' + esc(formatDateTime(o.cancelled_at)) + '</b></div>' : '') + '</div>' +
+      (allowed.length ? '<div class="mt-16"><div class="form-label mb-8">เปลี่ยนสถานะเป็น</div><div class="row row-wrap">' + allowed.map(function (s) {
+        var cls = s === 'CANCELLED' ? 'btn-outline-danger' : (s === 'PICKED_UP' ? 'btn-success' : 'btn-outline');
+        return '<button class="btn ' + cls + ' btn-sm" data-to="' + s + '">' + esc(ORDER_STATUS_TH[s]) + '</button>';
+      }).join('') + '</div><div class="form-group mt-12"><label class="form-label" for="stReason">เหตุผล (ถ้ามี)</label><input class="form-control" id="stReason" maxlength="200" placeholder="เช่น พนักงานแจ้งยกเลิก"></div></div>' : '') +
+      '<div class="mt-16"><div class="form-label mb-8">ประวัติสถานะ</div><div class="table-wrap"><table class="table"><thead><tr><th>เวลา</th><th>จาก</th><th>เป็น</th><th>โดย</th><th>หมายเหตุ</th></tr></thead><tbody>' +
+      (o.history || []).map(function (hh) { return '<tr><td class="nowrap">' + esc(formatDateTime(hh.created_at)) + '</td><td>' + (hh.from_status ? renderStatus(hh.from_status) : '-') + '</td><td>' + renderStatus(hh.to_status) + '</td><td>' + esc(hh.changed_by) + '</td><td>' + esc(hh.reason) + '</td></tr>'; }).join('') + '</tbody></table></div></div>';
+    var m = openModal({ title: 'รายละเอียด Order', body: body, size: 'lg', actions: [{ text: 'ปิด' }] });
+    $all('[data-to]', m.el).forEach(function (b) {
+      b.onclick = function () {
+        var to = b.dataset.to;
+        var go = function () {
+          guard(b, function () {
+            return apiCall('kitchen.setStatus', { order_id: o.order_id, status: to, reason: $('#stReason').value.trim(), version: o.version }).then(function () {
+              m.close();
+              showToast('เปลี่ยนสถานะเป็น "' + ORDER_STATUS_TH[to] + '" แล้ว', 'success');
+              if (after) after();
+            });
+          });
+        };
+        if (to === 'CANCELLED' || to === 'NO_SHOW' || to === 'PICKED_UP' || o.status === 'PICKED_UP') {
+          confirmModal('ยืนยันเปลี่ยนสถานะเป็น "' + ORDER_STATUS_TH[to] + '" ?', { danger: to === 'CANCELLED' || to === 'NO_SHOW', success: to === 'PICKED_UP', okText: 'ยืนยัน', detail: to === 'CANCELLED' ? 'ระบบจะคืนจำนวนอาหารเข้าสต็อก' : '' }).then(function (ok) { if (ok) go(); });
+        } else go();
+      };
+    });
+  }).catch(function (e) { if (!e.handled) showToast(e.message, 'error'); });
+}
+
+/* ---------------- 09 Food Pickup ---------------- */
+Desk.register('k-pickup', {
+  title: 'รับอาหาร', icon: 'checkCircle', roles: ['KITCHEN', 'ADMIN'],
+  render: function (el) {
+    var recent = Desk.pickupRecent || (Desk.pickupRecent = []);
+    var camSupported = 'BarcodeDetector' in window && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+    el.innerHTML = '<div class="grid-2"><div class="stack">' +
+      '<div class="card pickup-search"><label class="form-label" for="puQ">สแกน QR / รหัสพนักงาน / เลข Order</label>' +
+      '<form id="puForm" class="row mt-8" autocomplete="off"><div class="input-icon grow">' + icon('qr') + '<input class="form-control scan-input" id="puQ" placeholder="EMP00125 หรือ ORD-260925-0045" autocapitalize="characters" spellcheck="false" maxlength="40"></div>' +
+      '<button class="btn btn-primary btn-lg" type="submit" id="puBtn">' + icon('search') + '<span>ค้นหา</span></button></form>' +
+      '<div class="row mt-12 text-sm muted">' + icon('info', 'icon-sm') + '<span>รองรับเครื่องสแกน QR/Barcode แบบ USB/Bluetooth — สแกนแล้วระบบค้นหาอัตโนมัติ</span></div>' +
+      (camSupported ? '<button class="btn btn-outline mt-12" id="puCam">' + icon('camera') + '<span>สแกนด้วยกล้อง</span></button><div id="puCamBox" class="mt-12 hidden"><video class="scan-video" id="puVideo" playsinline muted></video><button class="btn btn-ghost btn-block mt-8" id="puCamStop">' + icon('stop') + '<span>ปิดกล้อง</span></button></div>' : '') +
+      '</div><div id="puResult"></div></div>' +
+      '<div class="card"><div class="card-header"><div class="card-title">' + icon('history') + 'รับอาหารล่าสุด (เครื่องนี้)</div></div><div class="card-body" id="puRecent"></div></div></div>';
+    var input = $('#puQ');
+    var renderRecent = function () {
+      $('#puRecent').innerHTML = recent.length ? recent.slice(0, 15).map(function (r) {
+        return '<div class="row-between" style="padding:8px 0;border-bottom:1px solid var(--border-2)"><div><div class="fw-600">' + esc(r.name) + ' <span class="muted text-sm mono">' + esc(r.code) + '</span></div><div class="text-sm muted mono">' + esc(r.order_no) + '</div></div><div class="text-sm">' + esc(formatTime(r.at)) + '</div></div>';
+      }).join('') : emptyState('ยังไม่มีการรับอาหาร', 'รายการที่ยืนยันรับแล้วจะแสดงที่นี่', 'checkCircle');
+    };
+    renderRecent();
+    var lookup = function () {
+      var q = input.value.trim().toUpperCase();
+      if (!q) { input.focus(); return Promise.resolve(); }
+      return apiCall('kitchen.lookup', { q: q }).then(function (d) {
+        var box = $('#puResult');
+        if (!d.rows.length) {
+          box.innerHTML = '<div class="card pickup-result"><div class="pickup-done bad">' + icon('xCircle', 'icon-lg') + '<span>ไม่พบรายการสั่งอาหารวันนี้</span></div>' +
+            (d.employee ? '<p class="text-center mt-12">พนักงาน: <b>' + esc(d.employee.name) + '</b> (' + esc(d.employee.employee_code) + ') ยังไม่ได้สั่งอาหารวันนี้</p>' : '<p class="text-center muted mt-12">ตรวจสอบรหัส "' + esc(q) + '" อีกครั้ง</p>') + '</div>';
+          input.select();
+          return;
+        }
+        box.innerHTML = d.rows.map(function (o) {
+          var st;
+          if (o.status === 'PICKED_UP') st = '<div class="pickup-done warn">' + icon('alert', 'icon-lg') + '<span>รับอาหารไปแล้วเมื่อ ' + esc(formatTime(o.picked_up_at)) + ' (' + esc(o.picked_up_by) + ')</span></div>';
+          else if (o.status === 'CANCELLED') st = '<div class="pickup-done bad">' + icon('xCircle', 'icon-lg') + '<span>Order นี้ถูกยกเลิกแล้ว</span></div>';
+          else st = '<button class="btn btn-success btn-xl btn-block" data-pickup="' + esc(o.order_id) + '">' + icon('check', 'icon-lg') + '<span>✓ รับอาหารแล้ว</span></button>';
+          return '<div class="card pickup-result mb-12"><div class="row-between"><div><div class="pr-name">' + esc(o.employee_name) + '</div><div class="muted">' + esc(o.employee_code) + ' · ' + esc(o.department) + '</div></div>' + renderStatus(o.status) + '</div>' +
+            '<div class="row mt-8 text-sm muted"><span class="mono">' + esc(o.order_no) + '</span><span>·</span><span>' + esc(o.meal_th) + '</span></div>' +
+            '<div class="pr-items">' + o.items.map(function (i) { return '<div class="it"><span>' + esc(i.name) + (i.note ? ' <span class="muted text-sm">(' + esc(i.note) + ')</span>' : '') + '</span><b>× ' + i.qty + '</b></div>'; }).join('') +
+            (o.note ? '<div class="text-sm mt-8" style="color:var(--warning-700)">📝 ' + esc(o.note) + '</div>' : '') + '</div>' +
+            '<div class="row-between mb-12"><span class="muted">ยอด</span><b class="text-lg">' + o.total_qty + ' กล่อง · ' + formatMoney(o.total_amount) + '</b></div>' + st + '</div>';
+        }).join('');
+        $all('[data-pickup]', box).forEach(function (b) {
+          var o = d.rows.filter(function (x) { return x.order_id === b.dataset.pickup; })[0];
+          b.onclick = function () {
+            confirmModal('ยืนยันรับอาหาร ' + o.employee_name + ' (' + o.total_qty + ' กล่อง)?', { title: 'ยืนยันรับอาหาร', success: true, okText: '✓ รับอาหารแล้ว', icon: 'checkCircle' }).then(function (ok) {
+              if (!ok) return;
+              guard(b, function () {
+                return apiCall('kitchen.pickup', { order_id: o.order_id }).then(function (r) {
+                  recent.unshift({ name: o.employee_name, code: o.employee_code, order_no: o.order_no, at: r.order.picked_up_at });
+                  renderRecent();
+                  b.outerHTML = '<div class="pickup-done">' + icon('checkCircle', 'icon-lg') + '<span>รับอาหารเรียบร้อย ' + esc(formatTime(r.order.picked_up_at)) + '</span></div>';
+                  showToast('บันทึกการรับอาหารแล้ว: ' + o.employee_name, 'success');
+                  input.value = '';
+                  input.focus();
+                }).catch(function (e) {
+                  if (e.code === 'ORDER_ALREADY_PICKED_UP') { showToast(e.message, 'warning'); lookup(); return; }
+                  throw e;
+                });
+              });
+            });
+          };
+        });
+        var first = $('[data-pickup]', box);
+        if (first && d.rows.length === 1) first.focus();
+      });
+    };
+    $('#puForm').onsubmit = function (e) { e.preventDefault(); guard($('#puBtn'), lookup); };
+    setTimeout(function () { input.focus(); }, 50);
+    // Camera scan (BarcodeDetector) — only shown when supported.
+    var stream = null, scanning = false;
+    var stopCam = function () {
+      scanning = false;
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      stream = null;
+      var bx = $('#puCamBox'); if (bx) bx.classList.add('hidden');
+    };
+    var cam = $('#puCam');
+    if (cam) {
+      cam.onclick = function () {
+        var detector;
+        try { detector = new BarcodeDetector({ formats: ['qr_code', 'code_128', 'code_39'] }); } catch (e) { showToast('อุปกรณ์นี้ไม่รองรับการสแกนด้วยกล้อง', 'warning'); return; }
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).then(function (s) {
+          stream = s;
+          var v = $('#puVideo');
+          v.srcObject = s;
+          v.play();
+          $('#puCamBox').classList.remove('hidden');
+          scanning = true;
+          var loop = function () {
+            if (!scanning || Desk.current !== 'k-pickup') { stopCam(); return; }
+            detector.detect(v).then(function (codes) {
+              if (codes && codes.length) { input.value = codes[0].rawValue; stopCam(); guard($('#puBtn'), lookup); }
+              else setTimeout(loop, 300);
+            }).catch(function () { setTimeout(loop, 500); });
+          };
+          loop();
+        }).catch(function () { showToast('ไม่สามารถเปิดกล้องได้ (ไม่ได้รับอนุญาต) — ใช้เครื่องสแกนหรือพิมพ์รหัสแทน', 'warning', 6000); });
+      };
+      $('#puCamStop').onclick = stopCam;
+    }
+  }
+});
+
+/* ---------------- Final Summary (สรุปยอดประจำวัน) ---------------- */
+Desk.register('k-summary', {
+  title: 'สรุปยอดประจำวัน', icon: 'file', roles: ['KITCHEN', 'ADMIN'],
+  render: function (el, params) {
+    var state = { window_id: params.window_id || '', date: params.date || '' };
+    var load = function () {
+      return apiCall('kitchen.summary', { window_id: state.window_id, date: state.date }).then(function (d) {
+        if (Desk.current !== 'k-summary') return;
+        state.window_id = d.window ? d.window.window_id : state.window_id;
+        state.date = d.date;
+        var k = d.kpi;
+        var depts = Object.keys(d.matrix).sort();
+        el.innerHTML = '<div class="page-head no-print"><div class="row row-wrap"><input type="date" class="form-control form-control-sm" id="fsDate" value="' + esc(d.date) + '" aria-label="วันที่" style="width:auto">' +
+          (d.windows.length ? '<select class="form-control form-control-sm" id="fsWin" aria-label="มื้อ" style="width:auto">' + windowOptions(d.windows, state.window_id, true) + '</select>' : '') + '</div>' +
+          '<div class="ph-actions">' + (canWrite() && d.window ? '<button class="btn btn-outline btn-sm" id="fsLine">' + icon('send', 'icon-sm') + '<span>ส่งสรุปไป LINE</span></button>' : '') +
+          '<button class="btn btn-primary btn-sm" id="fsPrint">' + icon('printer', 'icon-sm') + '<span>พิมพ์</span></button></div></div>' +
+          '<div class="card card-body mb-16"><div class="row-between row-wrap"><div><h2 style="font-size:22px">' + (d.window && d.window.status !== 'OPEN' ? '🔴 ปิดรับ Order แล้ว' : '🍱 สรุปยอดอาหาร') + '</h2><div class="muted">' + esc(d.date_th) + (d.window ? ' · ' + esc(d.window.meal_th) + ' · ปิดรับ ' + esc(formatTime(d.window.close_at)) : ' · ทุกมื้อ') + '</div></div>' +
+          '<div class="text-right"><div class="kpi-value">' + formatNumber(k.qty) + ' <span class="text-lg muted">กล่อง</span></div><div class="muted">รวม ' + formatNumber(k.orders) + ' Order · ' + formatMoney(k.revenue) + '</div></div></div></div>' +
+          '<div class="grid-2-even"><div class="card"><div class="card-header"><div class="card-title">' + icon('bowl') + 'ยอดรวมตามเมนู</div></div><div class="table-wrap mt-8">' +
+          (d.byMenu.length ? '<table class="table"><thead><tr><th>เมนู</th><th class="num">กล่อง</th><th class="num">Order</th></tr></thead><tbody>' + d.byMenu.map(function (m) { return '<tr><td class="fw-600">' + esc(m.name) + '</td><td class="num fw-700" style="font-size:17px">' + m.qty + '</td><td class="num">' + m.orders + '</td></tr>'; }).join('') +
+            '<tr><td class="fw-700">รวม</td><td class="num fw-700" style="font-size:17px">' + k.qty + '</td><td class="num fw-700">' + k.orders + '</td></tr></tbody></table>' : emptyState('ยังไม่มีรายการสั่งอาหาร', '', 'clipboard')) + '</div></div>' +
+          '<div class="card"><div class="card-header"><div class="card-title">' + icon('users') + 'ตามแผนก</div></div><div class="table-wrap mt-8">' +
+          (depts.length ? '<table class="table"><thead><tr><th>แผนก</th>' + d.menuNames.map(function (n) { return '<th class="num">' + esc(n) + '</th>'; }).join('') + '<th class="num">รวม</th></tr></thead><tbody>' +
+            depts.map(function (dp) { var tot = 0; return '<tr><td class="fw-600">' + esc(dp) + '</td>' + d.menuNames.map(function (n) { var v = d.matrix[dp][n] || 0; tot += v; return '<td class="num">' + (v || '-') + '</td>'; }).join('') + '<td class="num fw-700">' + tot + '</td></tr>'; }).join('') + '</tbody></table>' : emptyState('ยังไม่มีข้อมูล', '', 'users')) + '</div></div></div>' +
+          '<div class="card mt-16"><div class="card-header"><div class="card-title">' + icon('edit') + 'หมายเหตุพิเศษ (' + d.notes.length + ')</div></div><div class="table-wrap mt-8">' +
+          (d.notes.length ? '<table class="table"><thead><tr><th>Order</th><th>ชื่อ</th><th>เมนู</th><th class="num">จำนวน</th><th>หมายเหตุ</th></tr></thead><tbody>' + d.notes.map(function (n) { return '<tr><td class="mono">' + esc(n.order_no) + '</td><td>' + esc(n.employee_name) + '</td><td>' + esc(n.name) + '</td><td class="num">' + esc(n.qty) + '</td><td class="fw-600" style="color:var(--warning-700)">' + esc(n.note) + '</td></tr>'; }).join('') + '</tbody></table>' : '<div class="card-body muted">ไม่มีหมายเหตุพิเศษ</div>') + '</div></div>' +
+          '<p class="muted text-sm mt-12">สร้างเมื่อ ' + esc(formatDateTime(d.generatedAt)) + '</p>';
+        $('#fsDate').onchange = function () { state.date = this.value; state.window_id = ''; el.innerHTML = skeleton(3); load(); };
+        var ws = $('#fsWin'); if (ws) ws.onchange = function () { state.window_id = ws.value; el.innerHTML = skeleton(3); load(); };
+        $('#fsPrint').onclick = function () { window.print(); };
+        var ln = $('#fsLine');
+        if (ln) ln.onclick = function () {
+          confirmModal('ส่งสรุปยอดของมื้อนี้ไปที่กลุ่ม LINE?', { okText: 'ส่ง LINE', icon: 'send' }).then(function (ok) {
+            if (!ok) return;
+            guard(ln, function () {
+              return apiCall('kitchen.sendSummary', { window_id: state.window_id, final: d.window.status !== 'OPEN' }).then(function (r) {
+                if (r.result.sent) showToast('ส่งสรุปไป LINE แล้ว', 'success');
+                else showToast('เพิ่มเข้าคิวแล้ว แต่ยังส่งไม่สำเร็จ (ตรวจสอบการตั้งค่า LINE)', 'warning', 6000);
+              });
+            });
+          });
+        };
+      }).catch(function (e) { if (!e.handled) el.innerHTML = errorBlock(e); });
+    };
+    load();
+  }
+});
+
+/* ---------------- Kitchen settings (profile / PIN) ---------------- */
+Desk.register('k-settings', {
+  title: 'ตั้งค่าระบบ', icon: 'settings', roles: ['KITCHEN'],
+  render: function (el) {
+    var u = App.state.user;
+    var app = App.state.app || {};
+    el.innerHTML = '<div class="grid-2-even"><div class="card card-body"><div class="row gap-12"><div class="avatar" style="width:56px;height:56px;font-size:22px">' + esc(String(u.name).charAt(0)) + '</div><div><div class="fw-700 text-lg">' + esc(u.name) + '</div><div class="muted">' + esc(u.employee_code) + ' · ' + esc(u.department) + '</div><div class="mt-8">' + roleBadge(u.role) + '</div></div></div>' +
+      '<div class="row row-wrap mt-16"><button class="btn btn-primary" id="ksPin">' + icon('key') + '<span>เปลี่ยน PIN</span></button><button class="btn btn-outline" id="ksOrder">' + icon('cart') + '<span>สั่งอาหารของฉัน</span></button><button class="btn btn-outline-danger" id="ksLogout">' + icon('logout') + '<span>ออกจากระบบ</span></button></div></div>' +
+      '<div class="card card-body"><div class="card-title mb-12">' + icon('info') + 'ข้อมูลระบบ</div><div class="detail-list">' +
+      '<div class="summary-row"><span class="muted">บริษัท</span><b>' + esc(app.companyName) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">จำนวนสูงสุดต่อ Order</span><b>' + esc(app.maxQtyPerOrder) + ' กล่อง</b></div>' +
+      '<div class="summary-row"><span class="muted">อนุญาตแก้ไข / ยกเลิก</span><b>' + (app.allowEdit ? 'ได้' : 'ไม่ได้') + ' / ' + (app.allowCancel ? 'ได้' : 'ไม่ได้') + '</b></div>' +
+      '<div class="summary-row"><span class="muted">Timezone</span><b>' + esc(app.timezone) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">เวอร์ชัน</span><b>' + esc(app.version) + '</b></div></div>' +
+      '<p class="muted text-sm mt-12">การตั้งค่าระบบทั้งหมดทำได้โดยผู้ดูแลระบบ (ADMIN)</p></div></div>';
+    $('#ksPin').onclick = function () { App.showChangePin(false); };
+    $('#ksOrder').onclick = function () { App.switchMode('mobile'); };
+    $('#ksLogout').onclick = function () { App.logout(); };
+  }
+});
+</script>

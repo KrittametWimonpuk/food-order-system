@@ -1,0 +1,14 @@
+{
+  "name": "factory-food-ordering-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Factory Food Ordering System - Google Apps Script + Google Sheets + LINE Messaging API",
+  "scripts": {
+    "test": "node --test tests/backend.test.js",
+    "test:e2e": "node tests/e2e.js",
+    "dev": "node tests/dev-server.js 8080 --now \"2026-09-25 09:00\"",
+    "lint": "for f in src/*.gs; do cp \"$f\" /tmp/$(basename \"$f\" .gs).js && node --check /tmp/$(basename \"$f\" .gs).js || exit 1; done",
+    "push": "clasp push"
+  },
+  "license": "UNLICENSED"
+}
