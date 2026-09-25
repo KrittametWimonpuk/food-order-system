@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2563EB">
+  <title>ระบบจองอาหาร</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <?!= include('styles'); ?>
+</head>
+<body>
+  <a href="#app" class="sr-only">ข้ามไปยังเนื้อหา</a>
+  <div id="app" aria-live="polite">
+    <div class="login-screen"><div class="loading-box"><div class="spinner"></div><span>กำลังโหลดระบบ...</span></div></div>
+  </div>
+  <noscript><p style="padding:24px;text-align:center">กรุณาเปิดใช้งาน JavaScript เพื่อใช้ระบบจองอาหาร</p></noscript>
+
+  <script>
+    window.INITIAL_PAGE = '<?= initialPage ?>';
+    window.COMPANY_NAME = '<?= companyName ?>';
+  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js" defer></script>
+  <?!= include('components'); ?>
+  <?!= include('scripts'); ?>
+  <?!= include('login'); ?>
+  <?!= include('employee'); ?>
+  <?!= include('kitchen'); ?>
+  <?!= include('admin'); ?>
+  <script>
+    (function () {
+      function start() {
+        try { App.boot(); } catch (e) {
+          console.error(e);
+          document.getElementById('app').innerHTML = '<div class="login-screen"><div class="card login-card text-center"><h1 class="login-title">เกิดข้อผิดพลาด</h1><p class="muted mt-8">กรุณารีเฟรชหน้าเว็บ</p></div></div>';
+        }
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
+    })();
+  </script>
+</body>
+</html>

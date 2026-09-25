@@ -1,0 +1,575 @@
+<script>
+/* ==========================================================================
+   employee.html — Mobile ordering app
+   Screens: 02 Home · 03 Menu Detail · 04 Cart/Confirm · 05 Success · 06 My Orders · More
+   ========================================================================== */
+'use strict';
+
+var Employee = {
+  view: 'home',
+  data: null,
+  cart: null,
+  timer: null,
+  mineTab: 'today',
+  lastOrder: null,
+
+  start: function () {
+    Employee.loadCart();
+    App.root.innerHTML = '<div class="m-app" id="mApp"><div id="mView"></div></div>' +
+      '<nav class="mobile-nav" aria-label="เมนูหลัก">' +
+      Employee.navBtn('home', 'home', 'หน้าแรก') + Employee.navBtn('order', 'utensils', 'สั่งอาหาร') +
+      Employee.navBtn('mine', 'clipboard', 'รายการของฉัน') + Employee.navBtn('more', 'grid', 'อื่นๆ') + '</nav>';
+    $all('.mobile-nav button').forEach(function (b) { b.onclick = function () { Employee.go(b.dataset.view); }; });
+    Employee.timer = setInterval(Employee.tick, 1000);
+    Employee.go('home');
+  },
+
+  stop: function () {
+    if (Employee.timer) clearInterval(Employee.timer);
+    Employee.timer = null;
+  },
+
+  navBtn: function (view, ic, label) {
+    return '<button type="button" data-view="' + view + '" aria-label="' + esc(label) + '">' + icon(ic) + '<span>' + esc(label) + '</span>' +
+      (view === 'order' ? '<span class="nav-badge hidden" id="cartBadge"></span>' : '') + '</button>';
+  },
+
+  /** Navigates between mobile views. */
+  go: function (view, opts) {
+    opts = opts || {};
+    Employee.view = view;
+    $all('.mobile-nav button').forEach(function (b) {
+      var on = b.dataset.view === view || (view === 'cart' && b.dataset.view === 'order') || (view === 'success' && b.dataset.view === 'mine');
+      b.classList.toggle('active', on);
+      if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+    window.scrollTo(0, 0);
+    var v = $('#mView');
+    if (!v) return;
+    if (view === 'mine') return Employee.renderMine();
+    if (view === 'more') return Employee.renderMore();
+    if (view === 'success') return Employee.renderSuccess(opts.order);
+    if (!Employee.data || opts.reload) {
+      v.innerHTML = view === 'home' ? Employee.headerHtml() + '<div class="m-content">' + skeleton(3) + '</div>' : skeleton(4);
+      return Employee.load(opts.windowId);
+    }
+    Employee.render();
+  },
+
+  /** Loads home data (windows + menu + my orders) for a window. */
+  load: function (windowId) {
+    var wid = windowId || (Employee.data && Employee.data.window && Employee.data.window.window_id) || (Employee.cart && Employee.cart.window_id) || '';
+    return apiCall('employee.home', { window_id: wid }).then(function (d) {
+      Employee.data = d;
+      App.state.app = d.app;
+      Employee.render();
+    }).catch(function (e) {
+      if (e.handled) return;
+      var v = $('#mView');
+      if (v) v.innerHTML = '<div class="m-content plain">' + errorBlock(e, 'retryHome') + '</div>';
+      var r = $('#retryHome');
+      if (r) r.onclick = function () { Employee.go(Employee.view, { reload: true }); };
+    });
+  },
+
+  render: function () {
+    if (Employee.view === 'home') Employee.renderHome();
+    else if (Employee.view === 'order') Employee.renderOrder();
+    else if (Employee.view === 'cart') Employee.renderCart();
+    Employee.updateCartUi();
+  },
+
+  /* ---------------- Cart state ---------------- */
+  loadCart: function () {
+    try { Employee.cart = JSON.parse(Store.get('cart', true) || 'null'); } catch (e) { Employee.cart = null; }
+  },
+  saveCart: function () {
+    if (Employee.cart && !Employee.cart.lines.length && !Employee.cart.editOrderId) Employee.cart = null;
+    Store.set('cart', JSON.stringify(Employee.cart), true);
+    Employee.updateCartUi();
+  },
+  resetCart: function () { Employee.cart = null; Store.set('cart', 'null', true); },
+  newCart: function (windowId) {
+    return { window_id: windowId, lines: [], note: '', token: uuidv4(), editOrderId: '', editVersion: null, editOwn: {} };
+  },
+  menuById: function (id) {
+    var m = (Employee.data && Employee.data.menu) || [];
+    for (var i = 0; i < m.length; i++) if (m[i].daily_menu_id === id) return m[i];
+    return null;
+  },
+  cartLine: function (id) {
+    if (!Employee.cart) return null;
+    for (var i = 0; i < Employee.cart.lines.length; i++) if (Employee.cart.lines[i].daily_menu_id === id) return Employee.cart.lines[i];
+    return null;
+  },
+  cartTotals: function () {
+    var qty = 0, amt = 0;
+    (Employee.cart ? Employee.cart.lines : []).forEach(function (l) {
+      var m = Employee.menuById(l.daily_menu_id);
+      qty += l.qty;
+      amt += (m ? m.price : 0) * l.qty;
+    });
+    return { qty: qty, amount: Math.round(amt * 100) / 100 };
+  },
+  /** Max qty user may put for an item (UX only — server re-validates). */
+  maxFor: function (m) {
+    var own = (Employee.cart && Employee.cart.editOwn && Employee.cart.editOwn[m.daily_menu_id]) || 0;
+    var avail = m.remaining + own;
+    if (m.max_per_order > 0) avail = Math.min(avail, m.max_per_order);
+    return Math.max(0, avail);
+  },
+  /** Max boxes per order (0 in settings = unlimited). */
+  orderLimit: function () { var n = App.state.app ? Number(App.state.app.maxQtyPerOrder) : 0; return n > 0 ? n : Infinity; },
+  allowMultiple: function () { return !!(App.state.app && App.state.app.allowMultipleOrders); },
+
+  /**
+   * Sets qty of an item in the cart (0 removes). Returns false when blocked.
+   */
+  setQty: function (m, qty, note) {
+    var w = Employee.data.window;
+    if (!w || (!w.can_order)) { showToast(w && w.status === 'DRAFT' ? 'ยังไม่เปิดรับการสั่งอาหาร' : 'ปิดรับการสั่งอาหารแล้ว', 'warning'); return false; }
+    if (Employee.cart && Employee.cart.window_id !== w.window_id && (Employee.cart.lines.length || Employee.cart.editOrderId)) {
+      showToast('ตะกร้ามีรายการของมื้ออื่นอยู่ กรุณายืนยันหรือล้างตะกร้าก่อน', 'warning');
+      return false;
+    }
+    if (!Employee.cart) Employee.cart = Employee.newCart(w.window_id);
+    var line = Employee.cartLine(m.daily_menu_id);
+    var others = Employee.cartTotals().qty - (line ? line.qty : 0);
+    var limit = Employee.orderLimit();
+    if (qty > Employee.maxFor(m)) { showToast('เมนูนี้เหลือให้สั่งได้ ' + Employee.maxFor(m) + ' กล่อง', 'warning'); return false; }
+    if (others + qty > limit) { showToast('สั่งได้สูงสุด ' + limit + ' กล่องต่อ Order', 'warning'); return false; }
+    if (qty <= 0) {
+      Employee.cart.lines = Employee.cart.lines.filter(function (l) { return l.daily_menu_id !== m.daily_menu_id; });
+    } else if (line) {
+      line.qty = qty;
+      if (note !== undefined) line.note = note;
+    } else {
+      Employee.cart.lines.push({ daily_menu_id: m.daily_menu_id, qty: qty, note: note || '' });
+    }
+    Employee.saveCart();
+    return true;
+  },
+
+  updateCartUi: function () {
+    var t = Employee.cartTotals();
+    var badge = $('#cartBadge');
+    if (badge) { badge.textContent = t.qty; badge.classList.toggle('hidden', !t.qty); }
+    var bar = $('#cartBar');
+    var show = t.qty > 0 && (Employee.view === 'order' || Employee.view === 'home');
+    if (!show) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = h('<div class="cart-bar" id="cartBar"><span class="cart-count" id="cbCount"></span><div><div class="text-xs" style="opacity:.8">ตะกร้าของฉัน</div><div class="cart-total" id="cbTotal"></div></div>' +
+        '<button class="btn btn-primary" id="cbGo">' + icon('cart') + '<span>ดูตะกร้า</span></button></div>');
+      document.body.appendChild(bar);
+      $('#cbGo').onclick = function () { Employee.go('cart'); };
+    }
+    $('#cbCount').textContent = t.qty;
+    $('#cbTotal').textContent = formatMoney(t.amount);
+  },
+
+  /* ---------------- Countdown ---------------- */
+  tick: function () {
+    var els = $all('[data-countdown]');
+    if (!els.length) return;
+    var now = serverNow().getTime();
+    els.forEach(function (el) {
+      var target = parseLocal(el.dataset.countdown);
+      if (!target) return;
+      var sec = (target.getTime() - now) / 1000;
+      var t = $('.timer', el);
+      if (t) t.textContent = formatDuration(sec);
+      if (el.dataset.mode === 'close') {
+        el.classList.toggle('urgent', sec < 900);
+        el.classList.toggle('open', sec >= 900);
+      }
+      if (sec <= 0 && !el.dataset.fired) {
+        el.dataset.fired = '1';
+        setTimeout(function () { if (Employee.view === 'home' || Employee.view === 'order') Employee.load(); }, 1500);
+      }
+    });
+  },
+
+  /* ---------------- Views ---------------- */
+  headerHtml: function () {
+    var u = App.state.user;
+    var hour = bkkParts(serverNow()).H;
+    var greet = hour < 12 ? 'สวัสดีตอนเช้า' : (hour < 17 ? 'สวัสดีตอนบ่าย' : 'สวัสดีตอนเย็น');
+    return '<header class="m-header"><div class="m-top"><div class="m-brand">' + icon('bowl') + '<span>ระบบจองอาหารโรงงาน</span></div>' +
+      '<button class="btn btn-ghost btn-icon" id="mRefresh" aria-label="รีเฟรชข้อมูล">' + icon('refresh') + '</button></div>' +
+      '<div class="m-hello"><div class="hi">' + greet + ' 👋</div><div class="name">' + esc(u.name) + '</div>' +
+      '<div class="m-meta meta"><span class="m-chip">' + esc(u.employee_code) + '</span><span class="m-chip">' + esc(u.department) + '</span></div></div></header>';
+  },
+
+  mealCardHtml: function (w, compact) {
+    if (!w) return '<div class="card meal-card">' + emptyState('วันนี้ยังไม่มีเมนูอาหาร', 'ยังไม่เปิดรอบการสั่งอาหาร กรุณาตรวจสอบอีกครั้งภายหลัง', 'calendar') + '</div>';
+    var cd;
+    if (w.status === 'OPEN') cd = '<div class="countdown open" data-countdown="' + esc(w.close_at) + '" data-mode="close"><span class="lbl">' + icon('clock', 'icon-sm') + 'เหลือเวลาสั่งอาหาร</span><span class="timer">--:--:--</span></div>';
+    else if (w.status === 'DRAFT') cd = '<div class="countdown" data-countdown="' + esc(w.open_at) + '" data-mode="open"><span class="lbl">' + icon('clock', 'icon-sm') + 'เปิดรับจองในอีก</span><span class="timer">--:--:--</span></div>';
+    else cd = '<div class="countdown closed"><span class="lbl">' + icon('lock', 'icon-sm') + 'ปิดรับการสั่งอาหารแล้ว</span><span class="timer" style="font-size:16px">รับอาหาร ' + esc(formatTime(w.pickup_start, true)) + '–' + esc(formatTime(w.pickup_end, true)) + '</span></div>';
+    return '<div class="card meal-card"><div class="meal-top"><div><div class="meal-name">' + mealIcon(w.meal) + esc(w.meal_th) + '</div><div class="meal-date">' + esc(formatDate(w.date)) + '</div></div>' + renderStatus(w.status) + '</div>' +
+      (compact ? '' : '<div class="meal-times"><div class="meal-time-box"><div class="lbl">ปิดรับจอง</div><div class="val">' + esc(formatTime(w.close_at)) + '</div></div>' +
+        '<div class="meal-time-box"><div class="lbl">เวลารับอาหาร</div><div class="val">' + esc(formatTime(w.pickup_start, true)) + '–' + esc(formatTime(w.pickup_end, true)) + '</div></div></div>') +
+      cd + (w.note ? '<div class="alert alert-info mt-12">' + icon('info') + '<div>' + esc(w.note) + '</div></div>' : '') + '</div>';
+  },
+
+  windowTabsHtml: function () {
+    var ws = Employee.data.windows || [];
+    if (ws.length <= 1) return '';
+    var cur = Employee.data.window ? Employee.data.window.window_id : '';
+    return '<div class="window-tabs" role="tablist" aria-label="เลือกมื้ออาหาร">' + ws.map(function (w) {
+      var today = w.date === isoDate(serverNow());
+      return '<button class="window-tab' + (w.window_id === cur ? ' active' : '') + '" role="tab" aria-selected="' + (w.window_id === cur) + '" data-wid="' + esc(w.window_id) + '">' + esc(w.meal_th) + (today ? '' : ' · ' + esc(formatDate(w.date, true))) + '</button>';
+    }).join('') + '</div>';
+  },
+
+  bindWindowTabs: function () {
+    $all('.window-tab').forEach(function (b) {
+      b.onclick = function () { guard(b, function () { return Employee.load(b.dataset.wid); }); };
+    });
+  },
+
+  activeOrderHtml: function (o) {
+    var steps = ['CONFIRMED', 'PREPARING', 'READY', 'PICKED_UP'];
+    var idx = steps.indexOf(o.status);
+    var prog = idx >= 0 ? '<div class="order-progress" aria-hidden="true">' + steps.map(function (s, i) { return '<span class="step ' + (i < idx ? 'done' : (i === idx ? (o.status === 'PICKED_UP' ? 'done' : 'current') : '')) + '"></span>'; }).join('') + '</div>' : '';
+    return '<div class="card order-card"><div class="oc-top"><div><div class="muted text-sm">Order ของฉัน · ' + esc(o.meal_th) + '</div><div class="oc-no mono">' + esc(o.order_no) + '</div></div>' + renderStatus(o.status) + '</div>' + prog +
+      '<div class="oc-items">' + o.items.map(function (i) { return '<div class="it"><span>' + esc(i.name) + ' × ' + i.qty + (i.note ? ' <span class="muted text-sm">(' + esc(i.note) + ')</span>' : '') + '</span><b>' + formatMoney(i.subtotal) + '</b></div>'; }).join('') + '</div>' +
+      '<div class="oc-foot"><span class="fw-700">รวม ' + o.total_qty + ' กล่อง · ' + formatMoney(o.total_amount) + '</span>' +
+      '<div class="row"><button class="btn btn-soft btn-sm" data-qr="' + esc(o.order_no) + '">' + icon('qr', 'icon-sm') + '<span>QR รับอาหาร</span></button>' +
+      (o.can_edit ? '<button class="btn btn-outline btn-sm" data-edit="' + esc(o.order_id) + '">' + icon('edit', 'icon-sm') + '<span>แก้ไข</span></button>' : '') + '</div></div></div>';
+  },
+
+  renderHome: function () {
+    var d = Employee.data;
+    var w = d.window;
+    var active = (d.myOrders || []).filter(function (o) { return o.status !== 'CANCELLED'; });
+    var html = Employee.headerHtml() + '<div class="m-content">' + Employee.mealCardHtml(w);
+    if (d.windows.length > 1) html += Employee.windowTabsHtml();
+    if (active.length) html += active.map(Employee.activeOrderHtml).join('');
+    if (w && w.can_order && (!active.length || Employee.allowMultiple())) {
+      html += '<button class="btn btn-primary btn-lg btn-block" id="goOrder">' + icon(active.length ? 'plus' : 'utensils') + '<span>' + (active.length ? 'สั่งอาหารเพิ่ม' : 'สั่งอาหารเลย') + '</span></button>';
+    }
+    if (w && d.menu.length) {
+      html += '<div><div class="section-title"><span>เมนู' + esc(w.meal_th) + '</span><button class="btn btn-ghost btn-sm" id="seeAll"><span>ดูทั้งหมด</span>' + icon('chevronRight', 'icon-sm') + '</button></div>' +
+        '<div class="menu-list">' + d.menu.slice(0, 3).map(Employee.menuCardHtml).join('') + '</div></div>';
+    } else if (w) {
+      html += '<div class="card">' + emptyState('วันนี้ยังไม่มีเมนูอาหาร', 'ผู้ดูแลระบบยังไม่ได้เพิ่มเมนูสำหรับมื้อนี้', 'bowl') + '</div>';
+    }
+    html += '</div>';
+    $('#mView').innerHTML = html;
+    Employee.bindCommon();
+    var g = $('#goOrder'); if (g) g.onclick = function () { Employee.go('order'); };
+    var s = $('#seeAll'); if (s) s.onclick = function () { Employee.go('order'); };
+    Employee.tick();
+  },
+
+  menuCardHtml: function (m) {
+    var line = Employee.cartLine(m.daily_menu_id);
+    var inCart = line && Employee.cart.window_id === m.window_id;
+    var soldOut = m.status !== 'AVAILABLE' || m.remaining <= 0;
+    var ratio = m.stock_limit ? Math.round(m.remaining / m.stock_limit * 100) : 0;
+    var low = m.remaining > 0 && m.remaining <= 5;
+    var w = Employee.data.window;
+    var canOrder = w && w.can_order;
+    var action;
+    var existing = !(App.state.app && App.state.app.allowMultipleOrders) && !(Employee.cart && Employee.cart.editOrderId) &&
+      (Employee.data.myOrders || []).filter(function (o) { return o.status !== 'CANCELLED'; })[0];
+    if (existing && canOrder) action = existing.can_edit ? '<button type="button" class="btn btn-outline btn-sm" data-edit="' + esc(existing.order_id) + '">' + icon('edit', 'icon-sm') + '<span>แก้ไข Order</span></button>' : '<span class="badge badge-primary">สั่งแล้ว</span>';
+    else if (soldOut && !(Employee.cart && Employee.cart.editOwn && Employee.cart.editOwn[m.daily_menu_id])) action = '<span class="badge badge-danger">หมดแล้ว</span>';
+    else if (!canOrder) action = '<span class="badge">' + (w && w.status === 'DRAFT' ? 'ยังไม่เปิดรับ' : 'ปิดรับแล้ว') + '</span>';
+    else if (inCart) action = '<div class="stepper" role="group" aria-label="จำนวน ' + esc(m.name) + '"><button type="button" data-dec="' + esc(m.daily_menu_id) + '" aria-label="ลดจำนวน">' + icon('minus') + '</button><span class="val" aria-live="polite">' + line.qty + '</span><button type="button" data-inc="' + esc(m.daily_menu_id) + '" aria-label="เพิ่มจำนวน">' + icon('plus') + '</button></div>';
+    else action = '<button type="button" class="btn btn-primary btn-sm" data-pick="' + esc(m.daily_menu_id) + '">' + icon('plus', 'icon-sm') + '<span>เลือกเมนู</span></button>';
+    return '<div class="card menu-card' + (inCart ? ' in-cart' : '') + (soldOut ? ' sold-out' : '') + '">' +
+      '<div data-detail="' + esc(m.daily_menu_id) + '" role="button" tabindex="0" aria-label="ดูรายละเอียด ' + esc(m.name) + '">' + foodImage(m) + '</div>' +
+      '<div class="menu-info"><div class="menu-name" data-detail="' + esc(m.daily_menu_id) + '">' + esc(m.name) + '</div>' +
+      '<div class="menu-price">' + formatMoney(m.price) + '</div>' +
+      '<div class="menu-stock' + (low ? ' low' : '') + '"><span>' + (m.remaining > 0 ? 'เหลือ ' + m.remaining + ' กล่อง' : 'หมดแล้ว') + '</span><span class="bar"><span style="width:' + ratio + '%"></span></span></div>' +
+      (line && line.note ? '<div class="text-xs muted">หมายเหตุ: ' + esc(line.note) + '</div>' : '') +
+      '<div class="menu-actions">' + action + '</div></div></div>';
+  },
+
+  bindCommon: function () {
+    var r = $('#mRefresh');
+    if (r) r.onclick = function () { guard(r, function () { return Employee.load(); }); };
+    Employee.bindWindowTabs();
+    $all('[data-pick]').forEach(function (b) { b.onclick = function () { Employee.openDetail(Employee.menuById(b.dataset.pick)); }; });
+    $all('[data-detail]').forEach(function (b) {
+      var open = function () { Employee.openDetail(Employee.menuById(b.dataset.detail)); };
+      b.onclick = open;
+      b.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+    });
+    $all('[data-inc]').forEach(function (b) {
+      b.onclick = function () { var m = Employee.menuById(b.dataset.inc); var l = Employee.cartLine(m.daily_menu_id); if (Employee.setQty(m, (l ? l.qty : 0) + 1)) Employee.render(); };
+    });
+    $all('[data-dec]').forEach(function (b) {
+      b.onclick = function () { var m = Employee.menuById(b.dataset.dec); var l = Employee.cartLine(m.daily_menu_id); if (Employee.setQty(m, (l ? l.qty : 0) - 1)) Employee.render(); };
+    });
+    $all('[data-qr]').forEach(function (b) { b.onclick = function () { Employee.showQr(b.dataset.qr); }; });
+    $all('[data-edit]').forEach(function (b) { b.onclick = function () { Employee.startEdit(b.dataset.edit); }; });
+    $all('[data-cancel]').forEach(function (b) { b.onclick = function () { Employee.cancelOrder(b.dataset.cancel, b); }; });
+  },
+
+  renderOrder: function () {
+    var d = Employee.data;
+    var w = d.window;
+    var html = '<div class="m-page-header"><h1>สั่งอาหาร</h1><span class="grow"></span><button class="btn btn-ghost btn-icon" id="mRefresh" aria-label="รีเฟรชเมนู">' + icon('refresh') + '</button></div>' +
+      '<div class="m-content plain">' + Employee.windowTabsHtml() + Employee.mealCardHtml(w, true);
+    if (Employee.cart && Employee.cart.editOrderId) html += '<div class="alert alert-warning">' + icon('edit') + '<div>กำลังแก้ไข Order เดิม — เลือกเมนูแล้วกด "ดูตะกร้า" เพื่อบันทึก</div></div>';
+    var active = (d.myOrders || []).filter(function (o) { return o.status !== 'CANCELLED'; });
+    if (active.length && !(Employee.cart && Employee.cart.editOrderId) && w && w.can_order) {
+      html += Employee.allowMultiple()
+        ? '<div class="alert alert-info">' + icon('info') + '<div>คุณสั่งมื้อนี้แล้ว ' + active.length + ' Order — เลือกเมนูเพื่อสั่งเพิ่มได้เลย (ดู/แก้ไขได้ที่ "รายการของฉัน")</div></div>'
+        : '<div class="alert alert-info">' + icon('info') + '<div>คุณสั่งอาหารมื้อนี้แล้ว (' + esc(active[0].order_no) + ') หากต้องการเปลี่ยน กรุณากด "แก้ไข" ที่รายการของฉัน</div></div>';
+    }
+    if (w && !d.menu.length) html += '<div class="card">' + emptyState('วันนี้ยังไม่มีเมนูอาหาร', 'ยังไม่มีเมนูสำหรับมื้อนี้', 'bowl') + '</div>';
+    else if (w) html += '<div class="menu-list">' + d.menu.map(Employee.menuCardHtml).join('') + '</div>';
+    html += '<div style="height:70px"></div></div>';
+    $('#mView').innerHTML = html;
+    Employee.bindCommon();
+    Employee.tick();
+  },
+
+  /** Screen 03: menu detail bottom sheet. */
+  openDetail: function (m) {
+    if (!m) return;
+    var w = Employee.data.window;
+    var line = Employee.cartLine(m.daily_menu_id);
+    var qty = line ? line.qty : 1;
+    var note = line ? line.note : '';
+    var max = Employee.maxFor(m);
+    var canOrder = w && w.can_order && max > 0;
+    var chips = ['ไม่เผ็ด', 'เผ็ดน้อย', 'ไม่ใส่ผัก', 'แยกน้ำ', 'ไม่รับช้อนส้อม'];
+    var body = h('<div>' + foodImage(m, 'detail-img') +
+      '<div class="row-between mt-12"><h2 style="font-size:20px">' + esc(m.name) + '</h2><div class="menu-price" style="font-size:21px">' + formatMoney(m.price) + '</div></div>' +
+      (m.description ? '<p class="muted mt-8">' + esc(m.description) + '</p>' : '') +
+      '<div class="row mt-8"><span class="badge ' + (m.remaining > 5 ? 'badge-success' : (m.remaining > 0 ? 'badge-warning' : 'badge-danger')) + '">' + (m.remaining > 0 ? 'เหลือ ' + m.remaining + ' กล่อง' : 'หมดแล้ว') + '</span>' +
+      (m.category ? '<span class="badge">' + esc(m.category) + '</span>' : '') + (m.max_per_order ? '<span class="badge">สูงสุด ' + m.max_per_order + '/Order</span>' : '') + '</div>' +
+      (canOrder ? '<div class="row-between mt-16"><span class="fw-700">จำนวน</span><div class="stepper stepper-lg" role="group" aria-label="จำนวน"><button type="button" id="dDec" aria-label="ลดจำนวน">' + icon('minus') + '</button><span class="val" id="dQty" aria-live="polite">' + qty + '</span><button type="button" id="dInc" aria-label="เพิ่มจำนวน">' + icon('plus') + '</button></div></div>' +
+        '<div class="form-group mt-16"><label class="form-label" for="dNote">หมายเหตุ</label><div class="note-chips mb-8">' + chips.map(function (c) { return '<button type="button" class="note-chip" data-chip="' + esc(c) + '">' + esc(c) + '</button>'; }).join('') + '</div>' +
+        '<input class="form-control" id="dNote" maxlength="100" placeholder="เช่น ไม่เผ็ด" value="' + esc(note) + '"></div>' +
+        '<div class="row-between"><span class="muted">รวม</span><span class="summary-total"><span class="amt" id="dSum">' + formatMoney(m.price * qty) + '</span></span></div>'
+        : '<div class="alert alert-warning mt-16">' + icon('alert') + '<div>' + (!w || !w.can_order ? 'ไม่อยู่ในช่วงเวลาสั่งอาหาร' : 'เมนูนี้หมดแล้ว') + '</div></div>') + '</div>');
+    var modal = openModal({
+      title: 'รายละเอียดเมนู', body: body, sheet: true,
+      actions: canOrder ? [{ text: line ? 'บันทึก' : 'เพิ่มลงตะกร้า', cls: 'btn-primary btn-lg', icon: 'cart', onClick: function (mm) {
+        if (Employee.setQty(m, qty, $('#dNote').value.trim().substring(0, 100))) {
+          mm.close();
+          showToast(line ? 'อัปเดตตะกร้าแล้ว' : 'เพิ่ม ' + m.name + ' ลงตะกร้าแล้ว', 'success', 2000);
+          Employee.render();
+        }
+      } }] : [{ text: 'ปิด' }]
+    });
+    if (!canOrder) return;
+    var upd = function () { $('#dQty').textContent = qty; $('#dSum').textContent = formatMoney(m.price * qty); $('#dDec').disabled = qty <= 1; $('#dInc').disabled = qty >= max; };
+    $('#dDec', modal.el).onclick = function () { if (qty > 1) { qty--; upd(); } };
+    $('#dInc', modal.el).onclick = function () { if (qty < max) { qty++; upd(); } else showToast('เมนูนี้สั่งได้สูงสุด ' + max + ' กล่อง', 'warning'); };
+    var noteEl = $('#dNote', modal.el);
+    var syncChips = function () { $all('[data-chip]', modal.el).forEach(function (c) { c.classList.toggle('active', noteEl.value.indexOf(c.dataset.chip) >= 0); }); };
+    $all('[data-chip]', modal.el).forEach(function (c) {
+      c.onclick = function () {
+        var parts = noteEl.value.split(',').map(function (s) { return s.trim(); }).filter(String);
+        var i = parts.indexOf(c.dataset.chip);
+        if (i >= 0) parts.splice(i, 1); else parts.push(c.dataset.chip);
+        noteEl.value = parts.join(', ').substring(0, 100);
+        syncChips();
+      };
+    });
+    noteEl.oninput = syncChips;
+    syncChips();
+    upd();
+  },
+
+  /** Screen 04: cart / confirm order. */
+  renderCart: function () {
+    var c = Employee.cart;
+    var d = Employee.data;
+    var w = d.window && c && d.window.window_id === c.window_id ? d.window : null;
+    if (c && !w && d.windows.some(function (x) { return x.window_id === c.window_id; })) { Employee.load(c.window_id); return; }
+    var html = '<div class="m-page-header"><button class="btn btn-ghost btn-icon" id="cartBack" aria-label="กลับ">' + icon('chevronLeft') + '</button><h1>' + (c && c.editOrderId ? 'แก้ไขรายการ' : 'ตะกร้าของฉัน') + '</h1></div><div class="m-content plain">';
+    if (!c || !c.lines.length) {
+      html += '<div class="card">' + emptyState('ยังไม่มีรายการในตะกร้า', 'เลือกเมนูที่ต้องการแล้วกด "เพิ่มลงตะกร้า"', 'cart', '<button class="btn btn-primary" id="cartToMenu">' + icon('utensils') + '<span>ไปเลือกเมนู</span></button>') + '</div>';
+      if (c && c.editOrderId) html += '<button class="btn btn-outline btn-block" id="cartCancelEdit">ยกเลิกการแก้ไข</button>';
+      html += '</div>';
+      $('#mView').innerHTML = html;
+      $('#cartBack').onclick = function () { Employee.go('order'); };
+      var tm = $('#cartToMenu'); if (tm) tm.onclick = function () { Employee.go('order'); };
+      var ce = $('#cartCancelEdit'); if (ce) ce.onclick = function () { Employee.resetCart(); Employee.go('mine'); };
+      return;
+    }
+    var t = Employee.cartTotals();
+    html += (w ? '<div class="card card-body row-between"><div><div class="fw-700">' + mealIcon(w.meal) + ' ' + esc(w.meal_th) + '</div><div class="muted text-sm">' + esc(formatDate(w.date)) + ' · ปิดรับ ' + esc(formatTime(w.close_at)) + '</div></div>' + renderStatus(w.status) + '</div>' : '') +
+      '<div class="card card-body" style="padding-top:4px;padding-bottom:4px">' + c.lines.map(function (l) {
+        var m = Employee.menuById(l.daily_menu_id);
+        if (!m) return '<div class="cart-line"><div class="grow muted">เมนูนี้ไม่มีแล้ว</div><button class="btn btn-ghost btn-sm" data-remove="' + esc(l.daily_menu_id) + '">ลบ</button></div>';
+        return '<div class="cart-line">' + foodImage(m) + '<div class="grow"><div class="fw-700">' + esc(m.name) + '</div><div class="muted text-sm">' + formatMoney(m.price) + ' × ' + l.qty + '</div>' +
+          (l.note ? '<div class="text-xs muted">หมายเหตุ: ' + esc(l.note) + '</div>' : '') +
+          '<div class="row-between mt-8"><div class="stepper" role="group" aria-label="จำนวน ' + esc(m.name) + '"><button type="button" data-dec="' + esc(m.daily_menu_id) + '" aria-label="ลดจำนวน">' + icon(l.qty <= 1 ? 'trash' : 'minus') + '</button><span class="val">' + l.qty + '</span><button type="button" data-inc="' + esc(m.daily_menu_id) + '" aria-label="เพิ่มจำนวน">' + icon('plus') + '</button></div>' +
+          '<b>' + formatMoney(m.price * l.qty) + '</b></div></div></div>';
+      }).join('') + '</div>' +
+      '<div class="card card-body"><label class="form-label" for="orderNote">หมายเหตุถึงครัว (ถ้ามี)</label><textarea class="form-control mt-8" id="orderNote" maxlength="200" placeholder="เช่น รับแทนโดยเพื่อน / แพ้อาหาร">' + esc(c.note || '') + '</textarea></div>' +
+      '<div class="card card-body"><div class="summary-row"><span class="muted">จำนวน</span><b>' + t.qty + ' กล่อง</b></div>' +
+      '<div class="summary-row summary-total"><span>รวมทั้งหมด</span><span class="amt">' + formatMoney(t.amount) + '</span></div>' +
+      '<button class="btn btn-success btn-lg btn-block mt-12" id="confirmOrder"' + (w && w.can_order ? '' : ' disabled') + '>' + icon('check') + '<span>' + (c.editOrderId ? 'บันทึกการแก้ไข' : 'ยืนยันการสั่งอาหาร') + '</span></button>' +
+      (w && !w.can_order ? '<div class="field-error mt-8 text-center">ไม่อยู่ในช่วงเวลาสั่งอาหาร</div>' : '') +
+      (c.editOrderId ? '<button class="btn btn-ghost btn-block mt-8" id="cartCancelEdit">ยกเลิกการแก้ไข</button>' : '<button class="btn btn-ghost btn-block mt-8" id="cartClear">' + icon('trash', 'icon-sm') + '<span>ล้างตะกร้า</span></button>') +
+      '</div><div style="height:12px"></div></div>';
+    $('#mView').innerHTML = html;
+    $('#cartBack').onclick = function () { Employee.go('order'); };
+    Employee.bindCommon();
+    $all('[data-remove]').forEach(function (b) { b.onclick = function () { c.lines = c.lines.filter(function (l) { return l.daily_menu_id !== b.dataset.remove; }); Employee.saveCart(); Employee.renderCart(); }; });
+    $('#orderNote').oninput = function () { c.note = this.value.substring(0, 200); Employee.saveCart(); };
+    var cl = $('#cartClear');
+    if (cl) cl.onclick = function () { confirmModal('ต้องการล้างรายการทั้งหมดในตะกร้าหรือไม่?', { danger: true, okText: 'ล้างตะกร้า' }).then(function (ok) { if (ok) { Employee.resetCart(); Employee.renderCart(); Employee.updateCartUi(); } }); };
+    var ce = $('#cartCancelEdit');
+    if (ce) ce.onclick = function () { Employee.resetCart(); Employee.updateCartUi(); Employee.go('mine'); };
+    var btn = $('#confirmOrder');
+    btn.onclick = function () { guard(btn, Employee.submitOrder); };
+  },
+
+  /** Sends the order (idempotent: the same request_token is reused on retry). */
+  submitOrder: function () {
+    var c = Employee.cart;
+    if (!c || !c.lines.length) return Promise.resolve();
+    var t = Employee.cartTotals();
+    var items = c.lines.map(function (l) { return { daily_menu_id: l.daily_menu_id, qty: l.qty, note: l.note || '' }; });
+    var p = c.editOrderId
+      ? apiCall('order.update', { order_id: c.editOrderId, items: items, note: c.note || '', version: c.editVersion }, { loading: 'กำลังบันทึก...' })
+      : apiCall('order.create', { window_id: c.window_id, items: items, note: c.note || '', request_token: c.token, expected_total: t.amount }, { loading: 'กำลังสั่งอาหาร...' });
+    return p.then(function (d) {
+      var wasEdit = !!c.editOrderId;
+      Employee.resetCart();
+      Employee.updateCartUi();
+      Employee.lastOrder = d.order;
+      if (d.duplicate) showToast('ระบบได้รับรายการนี้แล้ว (ไม่สร้าง Order ซ้ำ)', 'info');
+      else showToast(wasEdit ? 'บันทึกการแก้ไขเรียบร้อย' : 'สั่งอาหารเรียบร้อย', 'success');
+      Employee.data = null;
+      Employee.go('success', { order: d.order });
+    }).catch(function (e) {
+      if (e.handled) return;
+      if (e.code === 'NETWORK_ERROR') { showToast(e.message + ' (กดยืนยันอีกครั้งได้ ระบบจะไม่สร้าง Order ซ้ำ)', 'error', 8000); return; }
+      showToast(e.message, 'error', 6000);
+      if (['MENU_SOLD_OUT', 'PRICE_CHANGED', 'MEAL_CLOSED', 'MEAL_NOT_OPEN', 'INVALID_QTY', 'MENU_NOT_FOUND'].indexOf(e.code) >= 0) {
+        Employee.load(c.window_id);
+      }
+      if (e.code === 'ORDER_EXISTS') { Employee.resetCart(); Employee.data = null; Employee.go('mine'); }
+    });
+  },
+
+  /** Screen 05: order success. */
+  renderSuccess: function (o) {
+    o = o || Employee.lastOrder;
+    if (!o) { Employee.go('home'); return; }
+    var created = parseLocal(o.updated_at || o.created_at);
+    $('#mView').innerHTML = '<div class="m-content plain"><div class="card success-screen">' +
+      '<div class="success-check">' + icon('check') + '</div><h2 style="font-size:22px">สั่งอาหารเรียบร้อย</h2><p class="muted mt-8">เลขที่ Order ของคุณ</p>' +
+      '<div class="order-no mono">' + esc(o.order_no) + '</div><div class="qr-box" aria-label="QR Code สำหรับรับอาหาร">' + qrSvg(o.order_no) + '</div><div class="text-xs muted">แสดง QR นี้ที่จุดรับอาหาร</div>' +
+      '<div class="detail-list">' +
+      '<div class="summary-row"><span class="muted">วันที่</span><b>' + esc(formatDate(o.order_date)) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">เวลา</span><b>' + esc(formatTime(created)) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">มื้ออาหาร</span><b>' + esc(o.meal_th) + '</b></div>' +
+      '<div class="summary-row"><span class="muted">รายการ</span><b class="text-right">' + o.items.map(function (i) { return esc(i.name) + ' × ' + i.qty; }).join('<br>') + '</b></div>' +
+      '<div class="summary-row"><span class="muted">จำนวน</span><b>' + o.total_qty + ' กล่อง</b></div>' +
+      '<div class="summary-row"><span class="muted">ยอดรวม</span><b style="color:var(--primary);font-size:18px">' + formatMoney(o.total_amount) + '</b></div>' +
+      (o.pickup_start ? '<div class="summary-row"><span class="muted">รับอาหาร</span><b>' + esc(formatTime(o.pickup_start, true)) + '–' + esc(formatTime(o.pickup_end)) + '</b></div>' : '') +
+      '</div>' +
+      '<button class="btn btn-primary btn-lg btn-block mt-16" id="sMine">' + icon('clipboard') + '<span>ดูรายการของฉัน</span></button>' +
+      '<button class="btn btn-outline btn-lg btn-block mt-8" id="sHome">' + icon('home') + '<span>กลับหน้าแรก</span></button></div></div>';
+    $('#sMine').onclick = function () { Employee.go('mine'); };
+    $('#sHome').onclick = function () { Employee.go('home', { reload: true }); };
+  },
+
+  /** Screen 06: my orders (today / history). */
+  renderMine: function () {
+    var tab = Employee.mineTab;
+    $('#mView').innerHTML = '<div class="m-page-header"><h1>รายการของฉัน</h1><span class="grow"></span><button class="btn btn-ghost btn-icon" id="mineRefresh" aria-label="รีเฟรช">' + icon('refresh') + '</button></div>' +
+      '<div class="m-content plain"><div class="tabs" role="tablist"><button class="tab' + (tab === 'today' ? ' active' : '') + '" role="tab" aria-selected="' + (tab === 'today') + '" data-tab="today">วันนี้</button>' +
+      '<button class="tab' + (tab === 'history' ? ' active' : '') + '" role="tab" aria-selected="' + (tab === 'history') + '" data-tab="history">ประวัติย้อนหลัง</button></div><div id="mineList">' + skeleton(2) + '</div></div>';
+    $all('[data-tab]').forEach(function (b) { b.onclick = function () { Employee.mineTab = b.dataset.tab; Employee.renderMine(); }; });
+    $('#mineRefresh').onclick = function () { Employee.renderMine(); };
+    apiCall('order.mine', { tab: tab }).then(function (d) {
+      var list = $('#mineList');
+      if (!list) return;
+      if (!d.rows.length) {
+        list.innerHTML = '<div class="card mt-12">' + emptyState('ยังไม่มีรายการสั่งอาหาร', tab === 'today' ? 'คุณยังไม่ได้สั่งอาหารวันนี้' : 'ยังไม่มีประวัติการสั่งอาหาร', 'clipboard',
+          tab === 'today' ? '<button class="btn btn-primary" id="mineOrder">' + icon('utensils') + '<span>สั่งอาหาร</span></button>' : '') + '</div>';
+        var mo = $('#mineOrder'); if (mo) mo.onclick = function () { Employee.go('order'); };
+        return;
+      }
+      list.innerHTML = '<div class="stack mt-12">' + d.rows.map(Employee.orderCardHtml).join('') + '</div>';
+      Employee.bindCommon();
+    }).catch(function (e) { var l = $('#mineList'); if (l && !e.handled) l.innerHTML = errorBlock(e); });
+  },
+
+  orderCardHtml: function (o) {
+    return '<div class="card order-card"><div class="oc-top"><div><div class="oc-no mono">' + esc(o.order_no) + '</div><div class="muted text-sm">' + esc(o.meal_th) + ' · ' + esc(formatDate(o.order_date, true)) + ' · ' + esc(formatTime(o.created_at)) + '</div></div>' + renderStatus(o.status) + '</div>' +
+      '<div class="oc-items">' + o.items.map(function (i) { return '<div class="it"><span>' + esc(i.name) + ' × ' + i.qty + (i.note ? ' <span class="muted text-sm">(' + esc(i.note) + ')</span>' : '') + '</span><span>' + formatMoney(i.subtotal) + '</span></div>'; }).join('') +
+      (o.note ? '<div class="text-sm muted mt-8">หมายเหตุ: ' + esc(o.note) + '</div>' : '') + '</div>' +
+      '<div class="oc-foot"><span class="fw-700">' + o.total_qty + ' กล่อง · ' + formatMoney(o.total_amount) + '</span><div class="row">' +
+      (o.status !== 'CANCELLED' && o.status !== 'PICKED_UP' && o.status !== 'NO_SHOW' ? '<button class="btn btn-soft btn-sm" data-qr="' + esc(o.order_no) + '" aria-label="QR รับอาหาร">' + icon('qr', 'icon-sm') + '</button>' : '') +
+      (o.can_edit ? '<button class="btn btn-outline btn-sm" data-edit="' + esc(o.order_id) + '">' + icon('edit', 'icon-sm') + '<span>แก้ไข</span></button>' : '') +
+      (o.can_cancel ? '<button class="btn btn-outline-danger btn-sm" data-cancel="' + esc(o.order_id) + '">' + icon('x', 'icon-sm') + '<span>ยกเลิก</span></button>' : '') +
+      (o.status === 'PICKED_UP' ? '<span class="text-sm muted">รับเมื่อ ' + esc(formatTime(o.picked_up_at)) + '</span>' : '') +
+      '</div></div></div>';
+  },
+
+  /** Loads an order into the cart for editing. */
+  startEdit: function (orderId) {
+    apiCall('order.get', { order_id: orderId }, { loading: true }).then(function (d) {
+      var o = d.order;
+      if (!o.can_edit) { showToast('ไม่สามารถแก้ไขรายการนี้ได้แล้ว', 'warning'); return; }
+      var own = {};
+      o.items.forEach(function (i) { own[i.daily_menu_id] = (own[i.daily_menu_id] || 0) + i.qty; });
+      Employee.cart = { window_id: o.window_id, lines: o.items.map(function (i) { return { daily_menu_id: i.daily_menu_id, qty: i.qty, note: i.note || '' }; }), note: o.note || '', token: uuidv4(), editOrderId: o.order_id, editVersion: o.version, editOwn: own };
+      Employee.saveCart();
+      Employee.data = null;
+      Employee.view = 'order';
+      Employee.go('order', { reload: true, windowId: o.window_id });
+    }).catch(function (e) { if (!e.handled) showToast(e.message, 'error'); });
+  },
+
+  cancelOrder: function (orderId, btn) {
+    confirmModal('ต้องการยกเลิก Order นี้หรือไม่?', { title: 'ยกเลิก Order', danger: true, okText: 'ยกเลิก Order', cancelText: 'ไม่ยกเลิก', detail: 'เมื่อยกเลิกแล้วสามารถสั่งใหม่ได้ก่อนปิดรอบ' }).then(function (ok) {
+      if (!ok) return;
+      guard(btn, function () {
+        return apiCall('order.cancel', { order_id: orderId }, { loading: 'กำลังยกเลิก...' }).then(function () {
+          showToast('ยกเลิก Order เรียบร้อย', 'success');
+          if (Employee.cart && Employee.cart.editOrderId === orderId) Employee.resetCart();
+          Employee.data = null;
+          if (Employee.view === 'mine') Employee.renderMine(); else Employee.go(Employee.view, { reload: true });
+        });
+      });
+    });
+  },
+
+  showQr: function (orderNo) {
+    openModal({ title: 'QR รับอาหาร', sheet: true, body: '<div class="text-center"><div class="order-no mono">' + esc(orderNo) + '</div><div class="qr-box" style="width:240px;height:240px">' + qrSvg(orderNo) + '</div><p class="muted">แสดง QR หรือเลข Order นี้ที่จุดรับอาหาร</p></div>', actions: [{ text: 'ปิด', cls: 'btn-primary' }] });
+  },
+
+  /** "อื่นๆ" — profile, change PIN, dashboard switch, logout. */
+  renderMore: function () {
+    var u = App.state.user;
+    var staff = u.role !== 'EMPLOYEE';
+    $('#mView').innerHTML = '<div class="m-page-header"><h1>อื่นๆ</h1></div><div class="m-content plain">' +
+      '<div class="card card-body row gap-12"><div class="avatar" style="width:54px;height:54px;font-size:22px">' + esc(String(u.name).charAt(0)) + '</div><div class="grow"><div class="fw-700 text-lg">' + esc(u.name) + '</div>' +
+      '<div class="muted text-sm">' + esc(u.employee_code) + ' · ' + esc(u.department) + '</div><div class="mt-8">' + roleBadge(u.role) + '</div></div></div>' +
+      '<div class="card list-menu">' +
+      (staff ? '<button id="moreDesk"><span class="lm-icon">' + icon('chart') + '</span><span>' + (u.role === 'KITCHEN' ? 'ไปหน้าครัว (Kitchen Dashboard)' : 'ไปหน้าผู้ดูแลระบบ (Dashboard)') + '</span><span class="chev">' + icon('chevronRight') + '</span></button>' : '') +
+      '<button id="moreHistory"><span class="lm-icon">' + icon('history') + '</span><span>ประวัติการสั่งอาหาร</span><span class="chev">' + icon('chevronRight') + '</span></button>' +
+      '<button id="morePin"><span class="lm-icon">' + icon('key') + '</span><span>เปลี่ยน PIN</span><span class="chev">' + icon('chevronRight') + '</span></button>' +
+      '<button id="moreHelp"><span class="lm-icon">' + icon('info') + '</span><span>วิธีใช้งาน</span><span class="chev">' + icon('chevronRight') + '</span></button>' +
+      '<button id="moreLogout" class="danger"><span class="lm-icon">' + icon('logout') + '</span><span>ออกจากระบบ</span></button></div>' +
+      '<p class="text-center text-xs muted">' + esc((App.state.app && App.state.app.companyName) || '') + ' · v' + esc((App.state.app && App.state.app.version) || '') + '</p></div>';
+    var dk = $('#moreDesk'); if (dk) dk.onclick = function () { App.switchMode('desk'); };
+    $('#moreHistory').onclick = function () { Employee.mineTab = 'history'; Employee.go('mine'); };
+    $('#morePin').onclick = function () { App.showChangePin(false); };
+    $('#moreLogout').onclick = function () { App.logout(); };
+    $('#moreHelp').onclick = function () {
+      var app = App.state.app || {};
+      openModal({ title: 'วิธีใช้งาน', sheet: true, body: '<ol style="padding-left:20px;margin:0;line-height:1.9">' +
+        '<li>ไปที่ <b>สั่งอาหาร</b> แล้วกด <b>เลือกเมนู</b></li><li>เลือกจำนวน ใส่หมายเหตุ แล้วกด <b>เพิ่มลงตะกร้า</b></li>' +
+        '<li>กด <b>ดูตะกร้า</b> แล้วกด <b>ยืนยันการสั่งอาหาร</b></li><li>แก้ไข/ยกเลิกได้ก่อนเวลาปิดรับจอง' + (app.allowEdit === false ? ' (ปิดการแก้ไขอยู่)' : '') + '</li>' +
+        '<li>แสดง <b>QR / เลข Order</b> ที่จุดรับอาหาร</li>' + (app.maxQtyPerOrder > 0 ? '<li>สั่งได้สูงสุด ' + esc(app.maxQtyPerOrder) + ' กล่องต่อ Order</li>' : '') + (app.allowMultipleOrders ? '<li>สั่งได้หลาย Order ต่อมื้อ</li>' : '') + '</ol>', actions: [{ text: 'เข้าใจแล้ว', cls: 'btn-primary' }] });
+    };
+  }
+};
+</script>

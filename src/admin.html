@@ -1,0 +1,686 @@
+<script>
+/* ==========================================================================
+   admin.html — Admin / Viewer screens
+   10 Admin Dashboard · 11 Menu · 12 Daily Menu · 13 Meal Windows · 14 Employees
+   16 Reports · 17 LINE · 18 Settings · 19 Audit Log · 20 Error/System Log · 21 Backup
+   ========================================================================== */
+'use strict';
+
+function isAdmin() { return App.state.user.role === 'ADMIN'; }
+/** Toast suffix describing how a menu change was applied to upcoming meals. */
+function syncNote(sync) {
+  if (!sync || !sync.windows) return '';
+  var parts = [];
+  if (sync.added) parts.push('เพิ่มเข้า ' + sync.added + ' มื้อที่เปิดอยู่');
+  if (sync.updated) parts.push('อัปเดต ' + sync.updated + ' มื้อ');
+  if (sync.removed) parts.push('ปิดขายใน ' + sync.removed + ' มื้อ');
+  return parts.length ? ' · ' + parts.join(' · ') : '';
+}
+
+/* ---------------- 10 Admin Dashboard ---------------- */
+Desk.register('a-dashboard', {
+  title: 'หน้าหลัก', icon: 'home', roles: ['ADMIN', 'VIEWER'],
+  render: function (el) {
+    var load = function (silent) {
+      return apiCall('admin.dashboard', { days: 14 }).then(function (d) {
+        if (Desk.current !== 'a-dashboard') return;
+        var k = d.kpi;
+        var health = d.health;
+        var warn = health && health.warnings.length ? health.warnings.map(function (w) {
+          return '<div class="alert alert-' + (w.level === 'danger' ? 'danger' : 'warning') + '">' + icon('alert') + '<div>' + esc(w.text) + '</div>' + (w.page ? '<button class="btn btn-sm btn-outline" data-goto="' + esc(w.page) + '">ตั้งค่า</button>' : '') + '</div>';
+        }).join('') : '';
+        var windowsHtml = d.windows.length ? d.windows.map(function (w) {
+          return '<div class="row-between" style="padding:10px 0;border-bottom:1px solid var(--border-2)"><div class="row">' + mealIcon(w.meal) + '<div><div class="fw-600">' + esc(w.meal_th) + '</div><div class="text-sm muted">เปิด ' + esc(formatTime(w.open_at, true)) + ' · ปิด ' + esc(formatTime(w.close_at, true)) + ' · รับ ' + esc(formatTime(w.pickup_start, true)) + '–' + esc(formatTime(w.pickup_end, true)) + '</div></div></div>' + renderStatus(w.status) + '</div>';
+        }).join('') : emptyState('วันนี้ยังไม่มีมื้ออาหาร', isAdmin() ? 'สร้างมื้ออาหารได้ที่เมนู "จัดการมื้ออาหาร"' : '', 'calendar');
+        el.innerHTML = warn +
+          '<div class="page-head"><div><h2>ภาพรวมวันนี้</h2><div class="muted">' + esc(d.date_th) + '</div></div><div class="ph-actions"><button class="btn btn-soft btn-sm" id="adRefresh">' + icon('refresh', 'icon-sm') + '<span>รีเฟรช</span></button></div></div>' +
+          '<div class="kpi-grid">' + kpiCard('Orders วันนี้', formatNumber(k.orders), 'clipboard', '', 'พนักงานสั่ง ' + d.employees.orderedToday + '/' + d.employees.active + ' คน') +
+          kpiCard('จำนวนกล่อง', formatNumber(k.qty), 'package', 'navy') + kpiCard('รายได้', formatMoney(k.revenue), 'chart', 'success') +
+          kpiCard('ยกเลิก / ไม่มารับ', formatNumber(k.cancelled) + ' / ' + formatNumber(k.no_show), 'xCircle', 'danger') + '</div>' +
+          '<div class="grid-2"><div class="card"><div class="card-header"><div class="card-title">' + icon('chart') + 'แนวโน้ม Order 14 วัน</div><span class="card-sub">จำนวน Order ต่อวัน</span></div><div class="card-body">' +
+          columnChart(d.trend.map(function (t) { var dd = parseLocal(t.date); var p = bkkParts(dd); return { label: p.d + '/' + (p.m + 1), value: t.orders, tip: formatDate(t.date, true) + ': ' + t.orders + ' Order · ' + t.qty + ' กล่อง · ' + formatMoney(t.revenue) }; }), { label: 'จำนวน Order รายวัน' }) + '</div></div>' +
+          '<div class="card"><div class="card-header"><div class="card-title">' + icon('calendar') + 'มื้ออาหารวันนี้</div></div><div class="card-body" style="padding-top:6px">' + windowsHtml + '</div></div></div>' +
+          '<div class="grid-2 mt-16"><div class="card"><div class="card-header"><div class="card-title">' + icon('bowl') + 'เมนูยอดนิยมวันนี้</div><span class="card-sub">กล่อง</span></div><div class="card-body">' +
+          hbarChart(d.byMenu.map(function (m) { return { label: m.name, value: m.qty }; }), { unit: 'กล่อง', emptyTitle: 'ยังไม่มีรายการสั่งอาหารวันนี้' }) + '</div></div>' +
+          '<div class="card"><div class="card-header"><div class="card-title">' + icon('pie') + 'ตามแผนก</div></div><div class="card-body">' +
+          donutChart(d.byDepartment.map(function (x) { return { label: x.department, value: x.qty }; }), { centerLabel: 'กล่อง', emptyTitle: 'ยังไม่มีข้อมูล' }) + '</div></div></div>' +
+          (health ? '<p class="muted text-sm mt-12">Scheduler ทำงานล่าสุด: ' + esc(health.schedulerLastRun ? formatDateTime(health.schedulerLastRun) : 'ยังไม่เคยทำงาน (ติดตั้ง Trigger ที่หน้าตั้งค่าระบบ)') + '</p>' : '');
+        bindVizTips(el);
+        $('#adRefresh').onclick = function () { guard(this, function () { return load(); }); };
+        $all('[data-goto]', el).forEach(function (b) { b.onclick = function () { Desk.go(b.dataset.goto); }; });
+      }).catch(function (e) { if (!e.handled && !silent) el.innerHTML = errorBlock(e); });
+    };
+    load();
+    Desk.every(60000, function () { load(true); });
+  }
+});
+
+/* ---------------- 11 Menu Management ---------------- */
+Desk.register('menu', {
+  title: 'จัดการเมนู', icon: 'bowl', roles: ['ADMIN'],
+  render: function (el) {
+    var state = { q: '', includeDeleted: false, rows: [], categories: [] };
+    el.innerHTML = '<div class="card"><div class="toolbar"><div class="input-icon search">' + icon('search') + '<input class="form-control form-control-sm" id="mnQ" type="search" placeholder="ค้นหาเมนู / รหัส / หมวด" aria-label="ค้นหาเมนู"></div>' +
+      '<label class="check text-sm"><input type="checkbox" id="mnDel"> แสดงเมนูที่ลบแล้ว</label><span class="grow"></span>' +
+      '<button class="btn btn-primary btn-sm" id="mnAdd">' + icon('plus', 'icon-sm') + '<span>เพิ่มเมนู</span></button></div><div id="mnTable">' + skeleton(3) + '</div></div>';
+    var load = function () {
+      return apiCall('menu.list', { q: state.q, includeDeleted: state.includeDeleted }).then(function (d) {
+        state.rows = d.rows; state.categories = d.categories;
+        var box = $('#mnTable');
+        if (!d.rows.length) { box.innerHTML = emptyState(state.q ? 'ไม่พบเมนูที่ค้นหา' : 'ยังไม่มีเมนูอาหาร', state.q ? '' : 'เริ่มต้นด้วยการเพิ่มเมนูแรก', 'bowl'); return; }
+        box.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr><th>รูป</th><th>เมนู</th><th>หมวด</th><th class="num">ราคา</th><th class="num">จำนวนสูงสุด</th><th class="num">ขายแล้ว (วันนี้)</th><th>สถานะ</th><th class="actions">จัดการ</th></tr></thead><tbody>' +
+          d.rows.map(function (m) {
+            return '<tr class="' + (m.is_deleted ? 'row-dim' : '') + '"><td>' + foodImage(m, 'table-thumb menu-img') + '</td><td><div class="fw-600">' + esc(m.name) + '</div><div class="text-xs muted mono">' + esc(m.code) + '</div></td><td>' + esc(m.category || '-') + '</td>' +
+              '<td class="num">' + formatMoney(m.default_price) + '</td><td class="num">' + m.default_stock + (m.max_per_order ? '<div class="text-xs muted">สูงสุด ' + m.max_per_order + '/Order</div>' : '') + '</td><td class="num">' + m.sold_today + (m.stock_today ? ' / ' + m.stock_today : '') + '</td>' +
+              '<td>' + (m.is_deleted ? '<span class="badge badge-danger">ลบแล้ว</span>' : '<label class="switch" title="เปิด/ปิดเมนู"><input type="checkbox" data-toggle="' + esc(m.item_id) + '"' + (m.status === 'ACTIVE' ? ' checked' : '') + ' aria-label="เปิด/ปิด ' + esc(m.name) + '"><span class="track"></span></label>') + '</td>' +
+              '<td class="actions">' + (m.is_deleted ? '<button class="btn btn-outline btn-sm" data-restore="' + esc(m.item_id) + '">กู้คืน</button>' :
+                '<button class="btn btn-outline btn-sm btn-icon" data-edit="' + esc(m.item_id) + '" aria-label="แก้ไข ' + esc(m.name) + '">' + icon('edit', 'icon-sm') + '</button><button class="btn btn-outline-danger btn-sm btn-icon" data-del="' + esc(m.item_id) + '" aria-label="ลบ ' + esc(m.name) + '">' + icon('trash', 'icon-sm') + '</button>') + '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+        $all('[data-edit]', box).forEach(function (b) { b.onclick = function () { editMenu(state.rows.filter(function (x) { return x.item_id === b.dataset.edit; })[0]); }; });
+        $all('[data-toggle]', box).forEach(function (c) {
+          c.onchange = function () {
+            var on = c.checked;
+            c.disabled = true;
+            apiCall('menu.toggle', { item_id: c.dataset.toggle, status: on ? 'ACTIVE' : 'INACTIVE' }).then(function (r) { showToast((on ? 'เปิดใช้งานเมนูแล้ว' : 'ปิดใช้งานเมนูแล้ว') + syncNote(r.sync), 'success', 4000); })
+              .catch(function (e) { c.checked = !on; if (!e.handled) showToast(e.message, 'error'); }).then(function () { c.disabled = false; });
+          };
+        });
+        $all('[data-del]', box).forEach(function (b) {
+          b.onclick = function () {
+            var m = state.rows.filter(function (x) { return x.item_id === b.dataset.del; })[0];
+            confirmModal('ลบเมนู "' + m.name + '" ?', { danger: true, okText: 'ลบเมนู', detail: 'เป็นการลบแบบ Soft Delete — ประวัติ Order เดิมไม่ได้รับผลกระทบ และกู้คืนได้' }).then(function (ok) {
+              if (ok) guard(b, function () { return apiCall('menu.delete', { item_id: m.item_id }).then(function () { showToast('ลบเมนูแล้ว', 'success'); return load(); }); });
+            });
+          };
+        });
+        $all('[data-restore]', box).forEach(function (b) { b.onclick = function () { guard(b, function () { return apiCall('menu.restore', { item_id: b.dataset.restore }).then(function () { showToast('กู้คืนเมนูแล้ว (สถานะปิดใช้งาน)', 'success'); return load(); }); }); }; });
+      }).catch(function (e) { if (!e.handled) $('#mnTable').innerHTML = errorBlock(e); });
+    };
+    var editMenu = function (m) {
+      m = m || { name: '', code: '', description: '', category: state.categories[0] || '', default_price: '', default_stock: 50, max_per_order: 0, image_url: '', status: 'ACTIVE', sort_order: state.rows.length + 1 };
+      var body = h('<form class="form-grid" novalidate>' +
+        formField({ name: 'name', label: 'ชื่อเมนู', value: m.name, required: true, max: 100, span2: true }) +
+        formField({ name: 'code', label: 'รหัสเมนู', value: m.code, placeholder: 'เว้นว่าง = สร้างอัตโนมัติ', max: 20 }) +
+        formField({ name: 'category', label: 'หมวดหมู่', type: 'select', value: m.category, options: [''].concat(state.categories).map(function (c) { return { value: c, label: c || '- ไม่ระบุ -' }; }) }) +
+        formField({ name: 'default_price', label: 'ราคา (บาท)', type: 'number', value: m.default_price, required: true, min: 0, step: '0.5', inputmode: 'decimal' }) +
+        formField({ name: 'default_stock', label: 'จำนวนสูงสุด/มื้อ (Stock Limit)', type: 'number', value: m.default_stock, required: true, min: 0, inputmode: 'numeric' }) +
+        formField({ name: 'max_per_order', label: 'สั่งได้สูงสุดต่อ Order', type: 'number', value: m.max_per_order, min: 0, hint: '0 = ไม่จำกัด (ใช้ค่าระบบ)', inputmode: 'numeric' }) +
+        formField({ name: 'sort_order', label: 'ลำดับการแสดง', type: 'number', value: m.sort_order, min: 0, inputmode: 'numeric' }) +
+        formField({ name: 'description', label: 'รายละเอียด', type: 'textarea', value: m.description, max: 300, span2: true }) +
+        '<div class="form-group span-2"><label class="form-label" for="f_image_url">รูปภาพ (URL https:// หรืออัปโหลด)</label><div class="row"><input class="form-control" id="f_image_url" name="image_url" value="' + esc(m.image_url) + '" placeholder="https://..."><label class="btn btn-outline" for="imgFile">' + icon('upload') + '<span>อัปโหลด</span></label><input type="file" id="imgFile" accept="image/png,image/jpeg,image/webp,image/gif" class="sr-only"></div><div class="form-hint">ไฟล์ไม่เกิน 2MB จะถูกเก็บใน Google Drive โฟลเดอร์ FoodFactory-Images</div><div id="imgPrev" class="mt-8"></div></div>' +
+        formField({ name: 'status', label: 'สถานะ', type: 'select', value: m.status, options: [{ value: 'ACTIVE', label: 'เปิดใช้งาน' }, { value: 'INACTIVE', label: 'ปิดใช้งาน' }] }) +
+        '</form>');
+      var preview = function () { var u = $('#f_image_url', body).value.trim(); $('#imgPrev', body).innerHTML = u ? foodImage({ name: $('#f_name', body).value, image_url: u }, 'table-thumb menu-img') : ''; };
+      openModal({
+        title: m.item_id ? 'แก้ไขเมนู' : 'เพิ่มเมนู', size: 'lg', body: body,
+        actions: [{ text: 'ยกเลิก' }, { text: 'บันทึก', cls: 'btn-primary', icon: 'check', onClick: function (modal) {
+          if (!checkRequired(body)) return;
+          var v = readForm(body);
+          v.item_id = m.item_id || '';
+          return apiCall('menu.save', v).then(function (r) { modal.close(); showToast('บันทึกเมนูแล้ว' + syncNote(r.sync), 'success', 5000); return load(); });
+        } }]
+      });
+      preview();
+      $('#f_image_url', body).oninput = debounce(preview, 400);
+      $('#imgFile', body).onchange = function () {
+        var f = this.files[0];
+        if (!f) return;
+        if (f.size > 2 * 1024 * 1024) { showToast('ไฟล์ต้องไม่เกิน 2MB', 'warning'); return; }
+        showLoading('กำลังอัปโหลดรูป...');
+        readFileBase64(f).then(function (b64) { return apiCall('menu.upload', { fileName: f.name, mimeType: f.type, data: b64 }); })
+          .then(function (r) { $('#f_image_url', body).value = r.url; preview(); showToast(r.shared ? 'อัปโหลดรูปแล้ว' : 'อัปโหลดแล้ว แต่ตั้งค่าแชร์ไม่สำเร็จ (รูปอาจไม่แสดง)', r.shared ? 'success' : 'warning'); })
+          .catch(function (e) { if (!e.handled) showToast(e.message || 'อัปโหลดไม่สำเร็จ', 'error'); })
+          .then(function () { hideLoading(); });
+      };
+    };
+    $('#mnAdd').onclick = function () { editMenu(null); };
+    $('#mnQ').oninput = debounce(function () { state.q = $('#mnQ').value.trim(); load(); }, 300);
+    $('#mnDel').onchange = function () { state.includeDeleted = this.checked; load(); };
+    load();
+  }
+});
+
+/* ---------------- 12 Daily Menu ---------------- */
+function DailyMenuPage(el, params, admin) {
+  var pageKey = admin ? 'daily' : 'k-daily';
+  var state = { date: params.date || isoDate(serverNow()), window_id: params.window_id || '' };
+  el.innerHTML = '<div class="card"><div class="toolbar"><input type="date" class="form-control form-control-sm" id="dmDate" value="' + esc(state.date) + '" aria-label="วันที่" style="width:auto"><select class="form-control form-control-sm" id="dmWin" aria-label="มื้อ" style="width:auto"></select><span class="grow"></span>' +
+    (admin ? '<button class="btn btn-outline btn-sm" id="dmCopy">' + icon('copy', 'icon-sm') + '<span>ใส่เมนูที่เปิดใช้งานทั้งหมด</span></button><button class="btn btn-outline btn-sm" id="dmRecalc" title="คำนวณจำนวนที่ขายใหม่จาก Order จริง">' + icon('refresh', 'icon-sm') + '<span>คำนวณสต็อกใหม่</span></button><button class="btn btn-primary btn-sm" id="dmAdd">' + icon('plus', 'icon-sm') + '<span>เพิ่มเมนูเข้ามื้อนี้</span></button>' : '') +
+    '</div><div id="dmInfo"></div><div id="dmTable">' + skeleton(3) + '</div></div>';
+  var loadWindows = function () {
+    return apiCall('meal.list', { from: state.date, to: state.date }).then(function (d) {
+      var ws = d.rows;
+      var sel = $('#dmWin');
+      if (!ws.length) {
+        sel.innerHTML = '<option value="">ไม่มีมื้ออาหาร</option>';
+        state.window_id = '';
+        $('#dmInfo').innerHTML = '';
+        $('#dmTable').innerHTML = emptyState('ยังไม่มีมื้ออาหารในวันนี้', admin ? 'สร้างมื้ออาหารก่อนที่หน้า "จัดการมื้ออาหาร"' : '', 'calendar', admin ? '<button class="btn btn-primary" id="dmGoMeal">' + icon('calendar') + '<span>จัดการมื้ออาหาร</span></button>' : '');
+        var g = $('#dmGoMeal'); if (g) g.onclick = function () { Desk.go('meals'); };
+        return;
+      }
+      if (!ws.some(function (w) { return w.window_id === state.window_id; })) {
+        var open = ws.filter(function (w) { return w.status === 'OPEN'; })[0];
+        state.window_id = (open || ws[0]).window_id;
+      }
+      sel.innerHTML = windowOptions(ws, state.window_id);
+      return load();
+    }).catch(function (e) { if (!e.handled) $('#dmTable').innerHTML = errorBlock(e); });
+  };
+  var load = function () {
+    if (!state.window_id) return Promise.resolve();
+    return apiCall('daily.list', { window_id: state.window_id }).then(function (d) {
+      if (Desk.current !== pageKey) return;
+      state.available = d.available;
+      var w = d.window;
+      $('#dmInfo').innerHTML = '<div class="toolbar" style="border-bottom:0;padding-bottom:0"><span>' + mealIcon(w.meal) + ' <b>' + esc(w.meal_th) + '</b> ' + esc(formatDate(w.date)) + '</span>' + renderStatus(w.status) + '<span class="muted text-sm">เปิด ' + esc(formatTime(w.open_at, true)) + ' · ปิด ' + esc(formatTime(w.close_at, true)) + '</span></div>';
+      var box = $('#dmTable');
+      if (!d.rows.length) { box.innerHTML = emptyState('วันนี้ยังไม่มีเมนูอาหาร', admin ? 'กด "เพิ่มเมนูเข้ามื้อนี้" หรือ "ใส่เมนูที่เปิดใช้งานทั้งหมด"' : 'ผู้ดูแลระบบยังไม่ได้เพิ่มเมนู', 'bowl'); return; }
+      box.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr><th>รูป</th><th>เมนู</th><th class="num">ราคา</th><th class="num">จำนวน (Stock)</th><th class="num">ขายแล้ว</th><th class="num">เหลือ</th><th class="num">สูงสุด/Order</th><th>สถานะ</th><th class="actions">จัดการ</th></tr></thead><tbody>' +
+        d.rows.map(function (r) {
+          return '<tr><td>' + foodImage(r, 'table-thumb menu-img') + '</td><td class="fw-600">' + esc(r.name) + '</td><td class="num">' + formatMoney(r.price) + '</td><td class="num">' + r.stock_limit + '</td><td class="num">' + r.sold_qty + '</td><td class="num fw-700">' + r.remaining + '</td><td class="num">' + (r.max_per_order || '-') + '</td><td>' + renderStatus(r.status) + '</td>' +
+            '<td class="actions">' + (r.stored_status === 'AVAILABLE' ? '<button class="btn btn-outline btn-sm" data-st="SOLD_OUT" data-id="' + esc(r.daily_menu_id) + '">ปิดการขาย</button>' : '<button class="btn btn-outline btn-sm" data-st="AVAILABLE" data-id="' + esc(r.daily_menu_id) + '">เปิดขาย</button>') +
+            (admin ? '<button class="btn btn-outline btn-sm btn-icon" data-edit="' + esc(r.daily_menu_id) + '" aria-label="แก้ไข ' + esc(r.name) + '">' + icon('edit', 'icon-sm') + '</button><button class="btn btn-outline-danger btn-sm btn-icon" data-rm="' + esc(r.daily_menu_id) + '" aria-label="นำออก ' + esc(r.name) + '">' + icon('trash', 'icon-sm') + '</button>' : '') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+      $all('[data-st]', box).forEach(function (b) {
+        b.onclick = function () { guard(b, function () { return apiCall('daily.save', { daily_menu_id: b.dataset.id, status: b.dataset.st }).then(function () { showToast(b.dataset.st === 'AVAILABLE' ? 'เปิดขายแล้ว' : 'ปิดการขายแล้ว', 'success', 2000); return load(); }); }); };
+      });
+      $all('[data-edit]', box).forEach(function (b) {
+        var r = d.rows.filter(function (x) { return x.daily_menu_id === b.dataset.edit; })[0];
+        b.onclick = function () {
+          var body = h('<form novalidate>' + '<p class="fw-700 mb-12">' + esc(r.name) + '</p>' +
+            formField({ name: 'price', label: 'ราคาวันนี้ (บาท)', type: 'number', value: r.price, required: true, min: 0, step: '0.5' }) +
+            formField({ name: 'stock_limit', label: 'จำนวนสูงสุด (Stock)', type: 'number', value: r.stock_limit, required: true, min: r.sold_qty, hint: 'ขายไปแล้ว ' + r.sold_qty + ' กล่อง' }) +
+            formField({ name: 'max_per_order', label: 'สั่งได้สูงสุดต่อ Order', type: 'number', value: r.max_per_order, min: 0, hint: '0 = ไม่จำกัด' }) + '</form>');
+          openModal({ title: 'แก้ไขเมนูประจำวัน', body: body, actions: [{ text: 'ยกเลิก' }, { text: 'บันทึก', cls: 'btn-primary', onClick: function (m) {
+            if (!checkRequired(body)) return;
+            var v = readForm(body);
+            v.daily_menu_id = r.daily_menu_id;
+            return apiCall('daily.save', v).then(function () { m.close(); showToast('บันทึกแล้ว', 'success'); return load(); });
+          } }] });
+        };
+      });
+      $all('[data-rm]', box).forEach(function (b) {
+        var r = d.rows.filter(function (x) { return x.daily_menu_id === b.dataset.rm; })[0];
+        b.onclick = function () {
+          confirmModal('นำเมนู "' + r.name + '" ออกจากมื้อนี้?', { danger: true, okText: 'นำออก', detail: r.sold_qty ? 'เมนูนี้มี Order แล้ว ระบบจะปิดการขายแทนการลบ' : '' }).then(function (ok) {
+            if (ok) guard(b, function () { return apiCall('daily.remove', { daily_menu_id: r.daily_menu_id }).then(function () { showToast('นำเมนูออกแล้ว', 'success'); return load(); }); });
+          });
+        };
+      });
+    }).catch(function (e) { if (!e.handled) $('#dmTable').innerHTML = errorBlock(e); });
+  };
+  $('#dmDate').onchange = function () { state.date = this.value; state.window_id = ''; $('#dmTable').innerHTML = skeleton(3); loadWindows(); };
+  $('#dmWin').onchange = function () { state.window_id = this.value; load(); };
+  if (admin) {
+    $('#dmAdd').onclick = function () {
+      if (!state.window_id) { showToast('กรุณาเลือกมื้ออาหาร', 'warning'); return; }
+      var av = state.available || [];
+      if (!av.length) { showToast('เมนูที่เปิดใช้งานทั้งหมดอยู่ในมื้อนี้แล้ว', 'info'); return; }
+      openModal({ title: 'เพิ่มเมนูเข้ามื้อนี้', body: '<p class="muted mb-12">เลือกเมนูจาก Menu Master (ใช้ราคาและจำนวนตั้งต้น แก้ไขภายหลังได้)</p><div class="stack">' + av.map(function (m) {
+        return '<label class="check"><input type="checkbox" value="' + esc(m.item_id) + '"> <span class="grow">' + esc(m.name) + ' <span class="muted text-sm">' + formatMoney(m.default_price) + ' · ' + m.default_stock + ' กล่อง</span></span></label>';
+      }).join('') + '</div>', actions: [{ text: 'ยกเลิก' }, { text: 'เพิ่มเมนู', cls: 'btn-primary', onClick: function (m) {
+        var ids = $all('input[type=checkbox]:checked', m.el).map(function (c) { return c.value; });
+        if (!ids.length) { showToast('กรุณาเลือกเมนู', 'warning'); return; }
+        return apiCall('daily.add', { window_id: state.window_id, item_ids: ids }).then(function (r) { m.close(); showToast('เพิ่ม ' + r.added + ' เมนูแล้ว', 'success'); return load(); });
+      } }] });
+    };
+    $('#dmCopy').onclick = function () {
+      if (!state.window_id) return;
+      var b = this;
+      guard(b, function () { return apiCall('daily.copy', { window_id: state.window_id }).then(function (r) { showToast(r.added ? 'เพิ่ม ' + r.added + ' เมนูแล้ว' : 'ไม่มีเมนูใหม่ให้เพิ่ม', r.added ? 'success' : 'info'); return load(); }); });
+    };
+    $('#dmRecalc').onclick = function () {
+      if (!state.window_id) return;
+      var b = this;
+      guard(b, function () { return apiCall('daily.recalc', { window_id: state.window_id }).then(function (r) { showToast(r.fixed ? 'แก้ไขตัวเลข ' + r.fixed + ' เมนู' : 'ตัวเลขสต็อกถูกต้องแล้ว', 'success'); return load(); }); });
+    };
+  }
+  loadWindows();
+}
+Desk.register('daily', { title: 'เมนูประจำวัน', icon: 'calendar', roles: ['ADMIN'], render: function (el, p) { DailyMenuPage(el, p, true); } });
+Desk.register('k-daily', { title: 'เมนูประจำวัน', icon: 'bowl', roles: ['KITCHEN'], render: function (el, p) { DailyMenuPage(el, p, false); } });
+
+/* ---------------- 13 Meal Window Management ---------------- */
+Desk.register('meals', {
+  title: 'จัดการมื้ออาหาร', icon: 'clock', roles: ['ADMIN'],
+  render: function (el) {
+    var today = isoDate(serverNow());
+    var state = { from: addDaysIso(today, -7), to: addDaysIso(today, 14), defaults: [] };
+    el.innerHTML = '<div class="card"><div class="toolbar"><label class="text-sm muted" for="mwFrom">ตั้งแต่</label><input type="date" class="form-control form-control-sm" id="mwFrom" value="' + state.from + '" style="width:auto"><label class="text-sm muted" for="mwTo">ถึง</label><input type="date" class="form-control form-control-sm" id="mwTo" value="' + state.to + '" style="width:auto"><span class="grow"></span>' +
+      '<button class="btn btn-primary btn-sm" id="mwAdd">' + icon('plus', 'icon-sm') + '<span>สร้างมื้ออาหาร</span></button></div>' +
+      '<div class="alert alert-info" style="margin:14px 16px 0">' + icon('info') + '<div>มื้อแบบ <b>อัตโนมัติ</b> จะเปิด/ปิดตามเวลาเอง (Scheduler) · หากกดเปลี่ยนสถานะเอง ระบบจะเปลี่ยนเป็นโหมด <b>กำหนดเอง</b> · ระบบปิดรับ Order ตามเวลาปิดเสมอ</div></div>' +
+      '<div id="mwTable">' + skeleton(3) + '</div></div>';
+    var load = function () {
+      return apiCall('meal.list', { from: state.from, to: state.to }).then(function (d) {
+        state.defaults = d.defaults;
+        var box = $('#mwTable');
+        if (!d.rows.length) { box.innerHTML = emptyState('ยังไม่มีมื้ออาหารในช่วงนี้', 'กด "สร้างมื้ออาหาร" เพื่อเริ่มต้น', 'calendar'); return; }
+        box.innerHTML = '<div class="table-wrap mt-8"><table class="table"><thead><tr><th>วันที่</th><th>มื้อ</th><th>เปิดรับ</th><th>ปิดรับ</th><th>รับอาหาร</th><th class="num">เมนู</th><th class="num">ขายแล้ว</th><th>โหมด</th><th>สถานะ</th><th class="actions">จัดการ</th></tr></thead><tbody>' +
+          d.rows.map(function (w) {
+            var isToday = w.date === today;
+            return '<tr><td class="nowrap' + (isToday ? ' fw-700' : '') + '">' + esc(formatDate(w.date, true)) + (isToday ? ' <span class="badge badge-primary">วันนี้</span>' : '') + '</td><td class="nowrap">' + esc(w.meal_th) + '</td>' +
+              '<td>' + esc(formatTime(w.open_at, true)) + '</td><td>' + esc(formatTime(w.close_at, true)) + '</td><td class="nowrap">' + esc(formatTime(w.pickup_start, true)) + '–' + esc(formatTime(w.pickup_end, true)) + '</td>' +
+              '<td class="num">' + w.menu_count + '</td><td class="num">' + w.sold_qty + '/' + w.stock_total + '</td><td>' + (w.auto ? '<span class="badge badge-success">อัตโนมัติ</span>' : '<span class="badge">กำหนดเอง</span>') + '</td><td>' + renderStatus(w.status) + '</td>' +
+              '<td class="actions"><button class="btn btn-outline btn-sm" data-status="' + esc(w.window_id) + '">สถานะ</button><button class="btn btn-outline btn-sm btn-icon" data-menu="' + esc(w.window_id) + '" data-date="' + esc(w.date) + '" aria-label="เมนูของมื้อนี้">' + icon('bowl', 'icon-sm') + '</button>' +
+              '<button class="btn btn-outline btn-sm btn-icon" data-edit="' + esc(w.window_id) + '" aria-label="แก้ไขมื้อ" title="แก้ไขวัน/เวลา">' + icon('edit', 'icon-sm') + '</button>' +
+              '<button class="btn btn-outline-danger btn-sm btn-icon" data-del="' + esc(w.window_id) + '" aria-label="ลบมื้อ" title="ลบมื้อ">' + icon('trash', 'icon-sm') + '</button></td></tr>';
+          }).join('') + '</tbody></table></div>';
+        $all('[data-edit]', box).forEach(function (b) { b.onclick = function () { editWindow(d.rows.filter(function (x) { return x.window_id === b.dataset.edit; })[0]); }; });
+        $all('[data-menu]', box).forEach(function (b) { b.onclick = function () { Desk.go('daily', { window_id: b.dataset.menu, date: b.dataset.date }); }; });
+        $all('[data-status]', box).forEach(function (b) { b.onclick = function () { statusDialog(d.rows.filter(function (x) { return x.window_id === b.dataset.status; })[0]); }; });
+        $all('[data-del]', box).forEach(function (b) {
+          var w = d.rows.filter(function (x) { return x.window_id === b.dataset.del; })[0];
+          b.onclick = function () {
+            confirmModal('ลบ' + w.meal_th + ' วันที่ ' + formatDate(w.date, true) + ' ?', { title: 'ลบมื้ออาหาร', danger: true, okText: 'ลบมื้อ',
+              detail: 'ลบได้เฉพาะมื้อที่ยังไม่มี Order (หรือ Order ถูกยกเลิกทั้งหมด) — หลังลบสามารถกด "สร้างมื้ออาหาร" ใหม่ได้ และระบบจะไม่สร้างมื้อนี้ซ้ำอัตโนมัติ' }).then(function (ok) {
+              if (ok) guard(b, function () { return apiCall('meal.delete', { window_id: w.window_id }).then(function () { showToast('ลบมื้ออาหารแล้ว', 'success'); return load(); }); });
+            });
+          };
+        });
+      }).catch(function (e) { if (!e.handled) $('#mwTable').innerHTML = errorBlock(e); });
+    };
+    var statusDialog = function (w) {
+      var opts = [['OPEN', 'เปิดรับจอง'], ['CLOSED', 'ปิดรับจอง'], ['PREPARING', 'กำลังเตรียม/รับอาหาร'], ['COMPLETED', 'จบมื้อ'], ['DRAFT', 'ร่าง (ยังไม่เปิด)']];
+      openModal({
+        title: 'สถานะ ' + w.meal_th + ' ' + formatDate(w.date, true),
+        body: '<p class="mb-12">สถานะปัจจุบัน: ' + renderStatus(w.status) + ' · โหมด ' + (w.auto ? 'อัตโนมัติ' : 'กำหนดเอง') + '</p><div class="stack">' + opts.map(function (o) {
+          return '<button class="btn btn-outline btn-block" data-set="' + o[0] + '"' + (o[0] === w.stored_status && !w.auto ? ' disabled' : '') + '>' + renderStatus(o[0], o[1]) + '</button>';
+        }).join('') + (w.auto ? '' : '<button class="btn btn-soft btn-block" data-auto="1">' + icon('clock') + '<span>กลับไปใช้โหมดอัตโนมัติ (ตามเวลา)</span></button>') + '</div>' +
+          '<p class="muted text-sm mt-12">เมื่อปิดรับจอง ระบบจะส่งสรุปยอดสุดท้ายไป LINE · เมื่อจบมื้อ Order ที่ยังไม่รับจะเป็น "ไม่มารับ" (ถ้าเปิด AUTO_NO_SHOW)</p>',
+        actions: [{ text: 'ปิด' }]
+      });
+      var m = ModalStack[ModalStack.length - 1];
+      $all('[data-set]', m.el).forEach(function (b) {
+        b.onclick = function () {
+          var st = b.dataset.set;
+          confirmModal('เปลี่ยนสถานะเป็น "' + (WINDOW_STATUS_TH[st] || st) + '" ?', { danger: st === 'CLOSED' || st === 'COMPLETED', okText: 'ยืนยัน' }).then(function (ok) {
+            if (ok) guard(b, function () { return apiCall('meal.setStatus', { window_id: w.window_id, status: st }).then(function () { m.close(); showToast('อัปเดตสถานะแล้ว', 'success'); return load(); }); });
+          });
+        };
+      });
+      var au = $('[data-auto]', m.el);
+      if (au) au.onclick = function () { guard(au, function () { return apiCall('meal.setAuto', { window_id: w.window_id }).then(function () { m.close(); showToast('เปลี่ยนเป็นโหมดอัตโนมัติแล้ว', 'success'); return load(); }); }); };
+    };
+    var editWindow = function (w) {
+      var isNew = !w;
+      var def = function (meal) { var x = state.defaults.filter(function (d) { return d.meal === meal; })[0]; return x ? x.times : { open: '08:00', close: '10:30', pickupStart: '11:30', pickupEnd: '13:00' }; };
+      var t = isNew ? def('LUNCH') : { open: formatTime(w.open_at, true), close: formatTime(w.close_at, true), pickupStart: formatTime(w.pickup_start, true), pickupEnd: formatTime(w.pickup_end, true) };
+      var body = h('<form class="form-grid" novalidate>' +
+        formField({ name: 'date', label: 'วันที่', type: 'date', value: isNew ? isoDate(serverNow()) : w.date, required: true }) +
+        formField({ name: 'meal', label: 'มื้อ', type: 'select', value: isNew ? 'LUNCH' : w.meal, options: [{ value: 'BREAKFAST', label: 'มื้อเช้า' }, { value: 'LUNCH', label: 'มื้อกลางวัน' }, { value: 'DINNER', label: 'มื้อเย็น' }] }) +
+        formField({ name: 'open', label: 'เปิดรับจอง', type: 'time', value: t.open, required: true }) +
+        formField({ name: 'close', label: 'ปิดรับจอง (Cutoff)', type: 'time', value: t.close, required: true }) +
+        formField({ name: 'pickup_start', label: 'เริ่มรับอาหาร', type: 'time', value: t.pickupStart, required: true }) +
+        formField({ name: 'pickup_end', label: 'สิ้นสุดรับอาหาร', type: 'time', value: t.pickupEnd, required: true }) +
+        formField({ name: 'note', label: 'หมายเหตุ (แสดงให้พนักงานเห็น)', value: isNew ? '' : w.note, max: 200, span2: true }) +
+        formField({ name: 'auto', label: 'โหมด', type: 'switch', value: isNew ? true : w.auto, switchLabel: 'เปิด/ปิดอัตโนมัติตามเวลา', span2: true,
+          hint: isNew ? '' : 'แก้เวลาแล้ว สถานะจะคำนวณใหม่ตามเวลา (แนะนำให้เปิดโหมดอัตโนมัติ) — มื้อที่จบแล้วจะกลับมาเปิดรับได้ถ้าเวลาปิดรับยังไม่ถึง' }) +
+        (isNew ? formField({ name: 'copy_menu', label: 'เมนู', type: 'switch', value: true, switchLabel: 'ใส่เมนูที่เปิดใช้งานทั้งหมดอัตโนมัติ', span2: true }) : '') + '</form>');
+      if (isNew) $('#f_meal', body).onchange = function () { var x = def(this.value); $('#f_open', body).value = x.open; $('#f_close', body).value = x.close; $('#f_pickup_start', body).value = x.pickupStart; $('#f_pickup_end', body).value = x.pickupEnd; };
+      openModal({ title: isNew ? 'สร้างมื้ออาหาร' : 'แก้ไขมื้ออาหาร', size: 'lg', body: body, actions: [{ text: 'ยกเลิก' }, { text: 'บันทึก', cls: 'btn-primary', icon: 'check', onClick: function (m) {
+        if (!checkRequired(body)) return;
+        var v = readForm(body);
+        if (!isNew) v.window_id = w.window_id;
+        return apiCall('meal.save', v).then(function () { m.close(); showToast('บันทึกมื้ออาหารแล้ว', 'success'); return load(); });
+      } }] });
+    };
+    $('#mwAdd').onclick = function () { editWindow(null); };
+    $('#mwFrom').onchange = function () { state.from = this.value; load(); };
+    $('#mwTo').onchange = function () { state.to = this.value; load(); };
+    load();
+  }
+});
+
+/* ---------------- 14 Employee Management ---------------- */
+Desk.register('employees', {
+  title: 'จัดการพนักงาน', icon: 'users', roles: ['ADMIN'],
+  render: function (el) {
+    var state = { q: '', department: '', role: '', status: '', rows: [], departments: [] };
+    el.innerHTML = '<div class="card"><div class="toolbar"><div class="input-icon search">' + icon('search') + '<input class="form-control form-control-sm" id="emQ" type="search" placeholder="ค้นหา รหัส / ชื่อ / แผนก" aria-label="ค้นหาพนักงาน"></div>' +
+      '<select class="form-control form-control-sm" id="emDept" aria-label="แผนก" style="width:auto"><option value="">ทุกแผนก</option></select>' +
+      '<select class="form-control form-control-sm" id="emRole" aria-label="Role" style="width:auto"><option value="">ทุก Role</option>' + ['EMPLOYEE', 'KITCHEN', 'ADMIN', 'VIEWER'].map(function (r) { return '<option value="' + r + '">' + esc(ROLE_TH[r]) + '</option>'; }).join('') + '</select>' +
+      '<select class="form-control form-control-sm" id="emStatus" aria-label="สถานะ" style="width:auto"><option value="">ทุกสถานะ</option><option value="ACTIVE">ใช้งาน</option><option value="DISABLED">ระงับ</option></select><span class="grow"></span>' +
+      '<button class="btn btn-outline btn-sm" id="emImport">' + icon('upload', 'icon-sm') + '<span>Import CSV</span></button><button class="btn btn-primary btn-sm" id="emAdd">' + icon('plus', 'icon-sm') + '<span>เพิ่มพนักงาน</span></button></div><div id="emTable">' + skeleton(4) + '</div></div>';
+    var load = function () {
+      return apiCall('emp.list', { q: state.q, department: state.department, role: state.role, status: state.status }).then(function (d) {
+        state.rows = d.rows; state.departments = d.departments;
+        var ds = $('#emDept');
+        ds.innerHTML = '<option value="">ทุกแผนก</option>' + d.departments.map(function (x) { return '<option' + (x === state.department ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('');
+        var box = $('#emTable');
+        if (!d.rows.length) { box.innerHTML = emptyState('ไม่พบพนักงาน', state.q ? 'ลองเปลี่ยนคำค้นหา' : '', 'users'); return; }
+        box.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr><th>Employee ID</th><th>ชื่อ</th><th>Department</th><th>Role</th><th>Status</th><th>เข้าใช้ล่าสุด</th><th class="actions">จัดการ</th></tr></thead><tbody>' +
+          d.rows.map(function (e) {
+            return '<tr class="' + (e.status === 'DISABLED' ? 'row-dim' : '') + '"><td class="mono fw-600">' + esc(e.employee_code) + '</td><td>' + esc(e.name) + (e.is_sample ? ' <span class="badge">ตัวอย่าง</span>' : '') + (e.locked ? ' <span class="badge badge-warning">ล็อกชั่วคราว</span>' : '') + (e.must_change_pin ? ' <span class="badge badge-primary">รอเปลี่ยน PIN</span>' : '') + '</td>' +
+              '<td>' + esc(e.department) + '</td><td>' + roleBadge(e.role) + '</td><td>' + renderStatus(e.status === 'ACTIVE' ? 'ACTIVE' : 'DISABLED', e.status === 'ACTIVE' ? 'ใช้งาน' : 'ระงับ') + '</td><td class="nowrap text-sm">' + esc(e.last_login ? formatDateTime(e.last_login) : '-') + '</td>' +
+              '<td class="actions"><button class="btn btn-outline btn-sm btn-icon" data-edit="' + esc(e.employee_id) + '" aria-label="แก้ไข ' + esc(e.name) + '">' + icon('edit', 'icon-sm') + '</button>' +
+              '<button class="btn btn-outline btn-sm" data-pin="' + esc(e.employee_id) + '">' + icon('key', 'icon-sm') + '<span>Reset PIN</span></button>' +
+              (e.status === 'ACTIVE' ? '<button class="btn btn-outline-danger btn-sm" data-dis="' + esc(e.employee_id) + '">Disable</button>' : '<button class="btn btn-outline btn-sm" data-en="' + esc(e.employee_id) + '">Enable</button>') + '</td></tr>';
+          }).join('') + '</tbody></table></div><div class="pagination"><span class="muted text-sm">ทั้งหมด ' + d.total + ' คน</span></div>';
+        var find = function (id) { return state.rows.filter(function (x) { return x.employee_id === id; })[0]; };
+        $all('[data-edit]', box).forEach(function (b) { b.onclick = function () { editEmp(find(b.dataset.edit)); }; });
+        $all('[data-pin]', box).forEach(function (b) {
+          b.onclick = function () {
+            var e = find(b.dataset.pin);
+            confirmModal('รีเซ็ต PIN ของ ' + e.name + ' (' + e.employee_code + ') ?', { okText: 'Reset PIN', icon: 'key', detail: 'ระบบจะสร้าง PIN ใหม่ ออกจากระบบทุกอุปกรณ์ และบังคับเปลี่ยน PIN เมื่อเข้าสู่ระบบ' }).then(function (ok) {
+              if (ok) guard(b, function () { return apiCall('emp.resetPin', { employee_id: e.employee_id }).then(function (r) { showPin(e, r.generatedPin); return load(); }); });
+            });
+          };
+        });
+        $all('[data-dis]', box).forEach(function (b) {
+          b.onclick = function () {
+            var e = find(b.dataset.dis);
+            confirmModal('ระงับการใช้งาน ' + e.name + ' ?', { danger: true, okText: 'Disable', detail: 'พนักงานจะออกจากระบบทันทีและเข้าสู่ระบบไม่ได้ (ข้อมูลเดิมยังอยู่)' }).then(function (ok) {
+              if (ok) guard(b, function () { return apiCall('emp.setStatus', { employee_id: e.employee_id, status: 'DISABLED' }).then(function () { showToast('ระงับการใช้งานแล้ว', 'success'); return load(); }); });
+            });
+          };
+        });
+        $all('[data-en]', box).forEach(function (b) { b.onclick = function () { guard(b, function () { return apiCall('emp.setStatus', { employee_id: b.dataset.en, status: 'ACTIVE' }).then(function () { showToast('เปิดใช้งานแล้ว', 'success'); return load(); }); }); }; });
+      }).catch(function (e) { if (!e.handled) $('#emTable').innerHTML = errorBlock(e); });
+    };
+    var showPin = function (e, pin) {
+      openModal({ title: 'PIN ใหม่', persistent: true, body: '<div class="text-center"><div class="confirm-icon success">' + icon('key') + '</div><p>' + esc(e.name) + ' (' + esc(e.employee_code) + ')</p><div class="order-no mono mt-8" style="font-size:34px;letter-spacing:.2em">' + esc(pin) + '</div>' +
+        '<p class="muted text-sm mt-12">แจ้ง PIN นี้ให้พนักงาน ระบบจะแสดงเพียงครั้งเดียว และพนักงานต้องเปลี่ยน PIN เมื่อเข้าสู่ระบบครั้งแรก</p></div>', actions: [{ text: 'ปิด', cls: 'btn-primary' }] });
+    };
+    var editEmp = function (e) {
+      var isNew = !e;
+      e = e || { employee_code: '', name: '', department: state.departments[0] || '', role: 'EMPLOYEE' };
+      var body = h('<form class="form-grid" novalidate>' +
+        formField({ name: 'employee_code', label: 'รหัสพนักงาน (Employee ID)', value: e.employee_code, required: true, max: 20, readonly: !isNew, placeholder: 'เช่น EMP00130' }) +
+        formField({ name: 'name', label: 'ชื่อ-นามสกุล', value: e.name, required: true, max: 100 }) +
+        formField({ name: 'department', label: 'แผนก', type: 'select', value: e.department, options: state.departments }) +
+        formField({ name: 'role', label: 'Role', type: 'select', value: e.role, options: ['EMPLOYEE', 'KITCHEN', 'ADMIN', 'VIEWER'].map(function (r) { return { value: r, label: ROLE_TH[r] }; }) }) +
+        (isNew ? formField({ name: 'pin', label: 'PIN เริ่มต้น (ไม่บังคับ)', type: 'password', inputmode: 'numeric', max: 8, hint: 'เว้นว่างเพื่อสร้าง PIN อัตโนมัติ · พนักงานต้องเปลี่ยน PIN ครั้งแรก', span2: true }) : '<p class="muted text-sm span-2">การเปลี่ยน Role จะทำให้พนักงานต้องเข้าสู่ระบบใหม่</p>') + '</form>');
+      openModal({ title: isNew ? 'เพิ่มพนักงาน' : 'แก้ไขพนักงาน', size: 'lg', body: body, actions: [{ text: 'ยกเลิก' }, { text: 'บันทึก', cls: 'btn-primary', icon: 'check', onClick: function (m) {
+        if (!checkRequired(body)) return;
+        var v = readForm(body);
+        if (!isNew) v.employee_id = e.employee_id;
+        return apiCall('emp.save', v).then(function (r) {
+          m.close();
+          showToast('บันทึกข้อมูลพนักงานแล้ว', 'success');
+          if (r.generatedPin) showPin(r.employee, r.generatedPin);
+          return load();
+        });
+      } }] });
+    };
+    $('#emAdd').onclick = function () { editEmp(null); };
+    $('#emImport').onclick = function () {
+      var body = h('<div><p class="muted mb-12">ไฟล์ CSV (UTF-8) คอลัมน์: <span class="mono">employee_code,name,department,role,pin</span> — pin เว้นว่างได้ (สร้างอัตโนมัติ) · รหัสที่มีอยู่แล้วจะถูกข้าม</p>' +
+        '<button class="btn btn-soft btn-sm mb-12" id="csvTpl">' + icon('download', 'icon-sm') + '<span>ดาวน์โหลดไฟล์ตัวอย่าง</span></button>' +
+        '<input type="file" accept=".csv,text/csv" id="csvFile" class="form-control"><div id="csvResult" class="mt-12"></div></div>');
+      openModal({ title: 'Import พนักงานจาก CSV', size: 'lg', body: body, actions: [{ text: 'ปิด' }, { text: 'นำเข้า', cls: 'btn-primary', icon: 'upload', onClick: function () {
+        var f = $('#csvFile', body).files[0];
+        if (!f) { showToast('กรุณาเลือกไฟล์ CSV', 'warning'); return; }
+        return readFileText(f).then(function (txt) { return apiCall('emp.import', { csv: txt }); }).then(function (r) {
+          $('#csvResult', body).innerHTML = '<div class="alert alert-success">' + icon('checkCircle') + '<div>นำเข้าสำเร็จ ' + r.created.length + ' คน · ข้าม ' + r.skipped.length + ' · ผิดพลาด ' + r.errors.length + '</div></div>' +
+            (r.created.length ? '<div class="table-wrap"><table class="table"><thead><tr><th>รหัส</th><th>ชื่อ</th><th>PIN เริ่มต้น</th></tr></thead><tbody>' + r.created.map(function (c) { return '<tr><td class="mono">' + esc(c.employee_code) + '</td><td>' + esc(c.name) + '</td><td class="mono fw-700">' + esc(c.pin) + '</td></tr>'; }).join('') + '</tbody></table></div><button class="btn btn-outline btn-sm mt-8" id="csvPins">' + icon('download', 'icon-sm') + '<span>ดาวน์โหลดรายการ PIN</span></button>' : '') +
+            (r.errors.length ? '<div class="alert alert-danger mt-8">' + icon('alert') + '<div>' + r.errors.map(function (x) { return 'บรรทัด ' + x.line + ': ' + esc(x.message); }).join('<br>') + '</div></div>' : '');
+          var dp = $('#csvPins', body);
+          if (dp) dp.onclick = function () { downloadFile('employee_pins.csv', '﻿employee_code,name,pin\r\n' + r.created.map(function (c) { return [c.employee_code, '"' + c.name.replace(/"/g, '""') + '"', c.pin].join(','); }).join('\r\n'), 'text/csv;charset=utf-8'); };
+          return load();
+        });
+      } }] });
+      $('#csvTpl', body).onclick = function () { downloadFile('employees_template.csv', '﻿employee_code,name,department,role,pin\r\nEMP00200,ตัวอย่าง พนักงาน,Production,EMPLOYEE,\r\n', 'text/csv;charset=utf-8'); };
+    };
+    var reload = debounce(load, 300);
+    $('#emQ').oninput = function () { state.q = this.value.trim(); reload(); };
+    $('#emDept').onchange = function () { state.department = this.value; load(); };
+    $('#emRole').onchange = function () { state.role = this.value; load(); };
+    $('#emStatus').onchange = function () { state.status = this.value; load(); };
+    load();
+  }
+});
+
+/* ---------------- 16 Reports ---------------- */
+Desk.register('reports', {
+  title: 'รายงาน', icon: 'chart', roles: ['ADMIN', 'VIEWER', 'KITCHEN'],
+  render: function (el) {
+    var today = isoDate(serverNow());
+    var state = { preset: 'week', from: addDaysIso(today, -6), to: today, meal: '', department: '', tab: 'menu' };
+    var presets = { today: [0, 0], week: [-6, 0], month: [-29, 0] };
+    el.innerHTML = '<div class="card mb-16"><div class="toolbar" style="border-bottom:0">' +
+      '<div class="tabs" style="width:auto" role="tablist">' + [['today', 'รายวัน'], ['week', 'รายสัปดาห์'], ['month', 'รายเดือน'], ['custom', 'กำหนดเอง']].map(function (p) { return '<button class="tab' + (state.preset === p[0] ? ' active' : '') + '" data-preset="' + p[0] + '">' + p[1] + '</button>'; }).join('') + '</div>' +
+      '<input type="date" class="form-control form-control-sm" id="rpFrom" aria-label="ตั้งแต่วันที่" style="width:auto"><span class="muted">ถึง</span><input type="date" class="form-control form-control-sm" id="rpTo" aria-label="ถึงวันที่" style="width:auto">' +
+      '<select class="form-control form-control-sm" id="rpMeal" aria-label="มื้อ" style="width:auto"><option value="">ทุกมื้อ</option><option value="BREAKFAST">มื้อเช้า</option><option value="LUNCH">มื้อกลางวัน</option><option value="DINNER">มื้อเย็น</option></select>' +
+      '<select class="form-control form-control-sm" id="rpDept" aria-label="แผนก" style="width:auto"><option value="">ทุกแผนก</option></select><span class="grow"></span>' +
+      '<button class="btn btn-success btn-sm" id="rpExport">' + icon('download', 'icon-sm') + '<span>Export Excel/CSV</span></button></div></div><div id="rpBody">' + skeleton(3) + '</div>';
+    var setDates = function () { $('#rpFrom').value = state.from; $('#rpTo').value = state.to; };
+    setDates();
+    var load = function () {
+      $('#rpBody').innerHTML = skeleton(3);
+      return apiCall('report.get', { from: state.from, to: state.to, meal: state.meal, department: state.department }).then(function (d) {
+        if (Desk.current !== 'reports') return;
+        var ds = $('#rpDept');
+        ds.innerHTML = '<option value="">ทุกแผนก</option>' + d.departments.map(function (x) { return '<option' + (x === state.department ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('');
+        var k = d.kpi;
+        var tables = {
+          menu: { label: 'ตามเมนู', head: ['เมนู', 'กล่อง', 'Order', 'รายได้'], rows: d.byMenu.map(function (m) { return [esc(m.name), formatNumber(m.qty), formatNumber(m.orders), formatMoney(m.revenue)]; }) },
+          department: { label: 'ตามแผนก', head: ['แผนก', 'Order', 'กล่อง', 'รายได้'], rows: d.byDepartment.map(function (x) { return [esc(x.department), formatNumber(x.orders), formatNumber(x.qty), formatMoney(x.revenue)]; }) },
+          employee: { label: 'ตามพนักงาน', head: ['รหัส', 'ชื่อ', 'แผนก', 'Order', 'กล่อง', 'ยอดเงิน', 'ยกเลิก', 'ไม่มารับ'], rows: d.byEmployee.map(function (e) { return ['<span class="mono">' + esc(e.employee_code) + '</span>', esc(e.name), esc(e.department), formatNumber(e.orders), formatNumber(e.qty), formatMoney(e.revenue), formatNumber(e.cancelled), formatNumber(e.no_show)]; }) },
+          daily: { label: 'รายวัน', head: ['วันที่', 'Order', 'กล่อง', 'รายได้', 'ยกเลิก', 'ไม่มารับ'], rows: d.byDate.slice().reverse().map(function (x) { return [esc(formatDate(x.date, true)), formatNumber(x.orders), formatNumber(x.qty), formatMoney(x.revenue), formatNumber(x.cancelled), formatNumber(x.no_show)]; }) },
+          cancel: { label: 'การยกเลิก', head: ['Order', 'วันที่', 'รหัส', 'ชื่อ', 'แผนก', 'กล่อง', 'ยกเลิกเมื่อ', 'โดย'], rows: d.cancellations.map(function (c) { return ['<span class="mono">' + esc(c.order_no) + '</span>', esc(formatDate(c.order_date, true)), esc(c.employee_code), esc(c.employee_name), esc(c.department), c.total_qty, esc(formatDateTime(c.cancelled_at)), esc(c.cancelled_by)]; }) },
+          noshow: { label: 'ไม่มารับ', head: ['Order', 'วันที่', 'รหัส', 'ชื่อ', 'แผนก', 'กล่อง', 'ยอดเงิน'], rows: d.noShows.map(function (c) { return ['<span class="mono">' + esc(c.order_no) + '</span>', esc(formatDate(c.order_date, true)), esc(c.employee_code), esc(c.employee_name), esc(c.department), c.total_qty, formatMoney(c.total_amount)]; }) }
+        };
+        var tbl = function (key) {
+          var t = tables[key];
+          if (!t.rows.length) return emptyState('ไม่มีข้อมูลในช่วงเวลานี้', '', 'chart');
+          return '<div class="table-wrap"><table class="table"><thead><tr>' + t.head.map(function (x, i) { return '<th' + (i && /Order|กล่อง|รายได้|ยอด|ยกเลิก|ไม่มารับ/.test(x) ? ' class="num"' : '') + '>' + esc(x) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+            t.rows.map(function (r) { return '<tr>' + r.map(function (c, i) { return '<td' + (i && /Order|กล่อง|รายได้|ยอด|ยกเลิก|ไม่มารับ/.test(t.head[i]) ? ' class="num"' : '') + '>' + c + '</td>'; }).join('') + '</tr>'; }).join('') + '</tbody></table></div>';
+        };
+        $('#rpBody').innerHTML = '<div class="kpi-grid">' + kpiCard('Orders', formatNumber(k.orders), 'clipboard', '', formatDate(d.filters.from, true) + ' – ' + formatDate(d.filters.to, true)) + kpiCard('Food Qty (กล่อง)', formatNumber(k.qty), 'package', 'navy') +
+          kpiCard('Revenue', formatMoney(k.revenue), 'chart', 'success', 'รวม No Show ' + formatNumber(k.no_show)) + kpiCard('Cancelled', formatNumber(k.cancelled), 'xCircle', 'danger', k.all_orders ? Math.round(k.cancelled / k.all_orders * 100) + '% ของทั้งหมด' : '') + '</div>' +
+          '<div class="grid-2"><div class="card"><div class="card-header"><div class="card-title">' + icon('chart') + 'แนวโน้ม Order</div><span class="card-sub">Order ต่อวัน</span></div><div class="card-body">' +
+          columnChart(d.byDate.map(function (t) { var p = bkkParts(parseLocal(t.date)); return { label: p.d + '/' + (p.m + 1), value: t.orders, tip: formatDate(t.date, true) + ': ' + t.orders + ' Order · ' + t.qty + ' กล่อง · ' + formatMoney(t.revenue) }; }), { label: 'แนวโน้ม Order' }) + '</div></div>' +
+          '<div class="card"><div class="card-header"><div class="card-title">' + icon('pie') + 'ตามแผนก</div></div><div class="card-body">' + donutChart(d.byDepartment.map(function (x) { return { label: x.department, value: x.qty }; }), { centerLabel: 'กล่อง' }) + '</div></div></div>' +
+          '<div class="card mt-16"><div class="card-header"><div class="card-title">' + icon('bowl') + 'จำนวนตามเมนู</div><span class="card-sub">กล่อง</span></div><div class="card-body">' + hbarChart(d.byMenu.map(function (m) { return { label: m.name, value: m.qty, sub: formatMoney(m.revenue) }; }), { unit: 'กล่อง' }) + '</div></div>' +
+          '<div class="card mt-16"><div class="filter-pills" role="tablist">' + Object.keys(tables).map(function (key) { return '<button class="pill' + (state.tab === key ? ' active' : '') + '" data-rtab="' + key + '">' + tables[key].label + ' <span class="cnt">' + tables[key].rows.length + '</span></button>'; }).join('') + '</div><div class="mt-12" id="rpTable">' + tbl(state.tab) + '</div></div>';
+        bindVizTips($('#rpBody'));
+        $all('[data-rtab]').forEach(function (b) { b.onclick = function () { state.tab = b.dataset.rtab; $all('[data-rtab]').forEach(function (x) { x.classList.toggle('active', x === b); }); $('#rpTable').innerHTML = tbl(state.tab); }; });
+      }).catch(function (e) { if (!e.handled) $('#rpBody').innerHTML = errorBlock(e); });
+    };
+    $all('[data-preset]').forEach(function (b) {
+      b.onclick = function () {
+        state.preset = b.dataset.preset;
+        $all('[data-preset]').forEach(function (x) { x.classList.toggle('active', x === b); });
+        var now = isoDate(serverNow());
+        if (presets[state.preset]) { state.from = addDaysIso(now, presets[state.preset][0]); state.to = addDaysIso(now, presets[state.preset][1]); setDates(); load(); }
+        else $('#rpFrom').focus();
+      };
+    });
+    var custom = function () { state.from = $('#rpFrom').value || state.from; state.to = $('#rpTo').value || state.to; state.preset = 'custom'; $all('[data-preset]').forEach(function (x) { x.classList.toggle('active', x.dataset.preset === 'custom'); }); load(); };
+    $('#rpFrom').onchange = custom;
+    $('#rpTo').onchange = custom;
+    $('#rpMeal').onchange = function () { state.meal = this.value; load(); };
+    $('#rpDept').onchange = function () { state.department = this.value; load(); };
+    $('#rpExport').onclick = function () {
+      var types = [['orders', 'รายละเอียด Order ทั้งหมด'], ['daily', 'สรุปรายวัน'], ['menu', 'สรุปตามเมนู'], ['department', 'สรุปตามแผนก'], ['employee', 'สรุปตามพนักงาน']];
+      openModal({ title: 'Export รายงาน (CSV เปิดใน Excel ได้)', body: '<p class="muted mb-12">ช่วงวันที่ ' + esc(formatDate(state.from, true)) + ' – ' + esc(formatDate(state.to, true)) + (state.meal ? ' · ' + esc(MEAL_TH[state.meal]) : '') + (state.department ? ' · ' + esc(state.department) : '') + '</p><div class="stack">' +
+        types.map(function (t, i) { return '<label class="check"><input type="radio" name="exType" value="' + t[0] + '"' + (i === 0 ? ' checked' : '') + '> ' + t[1] + '</label>'; }).join('') + '</div>',
+        actions: [{ text: 'ยกเลิก' }, { text: 'บันทึกไป Google Drive', cls: 'btn-outline', onClick: function (m) {
+          var type = $('input[name=exType]:checked', m.el).value;
+          return apiCall('report.exportDrive', { type: type, from: state.from, to: state.to, meal: state.meal, department: state.department }).then(function (r) {
+            m.close();
+            openModal({ title: 'บันทึกไฟล์แล้ว', body: '<p>' + esc(r.filename) + ' (' + r.rows + ' แถว)</p><p class="mt-8"><a href="' + safeUrl(r.url) + '" target="_blank" rel="noopener">เปิดไฟล์ใน Google Drive</a></p>', actions: [{ text: 'ปิด', cls: 'btn-primary' }] });
+          });
+        } }, { text: 'ดาวน์โหลด CSV', cls: 'btn-success', icon: 'download', onClick: function (m) {
+          var type = $('input[name=exType]:checked', m.el).value;
+          return apiCall('report.export', { type: type, from: state.from, to: state.to, meal: state.meal, department: state.department }).then(function (r) {
+            downloadFile(r.filename, r.csv, r.mimeType);
+            m.close();
+            showToast('ดาวน์โหลด ' + r.filename + ' (' + r.rows + ' แถว)', 'success');
+          });
+        } }] });
+    };
+    load();
+  }
+});
+
+/* ---------------- 17 LINE Settings ---------------- */
+Desk.register('line', {
+  title: 'LINE Notification', navLabel: 'LINE', icon: 'message', roles: ['ADMIN'],
+  render: function (el) {
+    var state = { status: '' };
+    var load = function () {
+      return Promise.all([apiCall('line.status'), apiCall('noti.list', { status: state.status })]).then(function (res) {
+        if (Desk.current !== 'line') return;
+        var s = res[0], q = res[1];
+        var modeTh = { INSTANT: 'INSTANT — ส่งทุก Order', SUMMARY: 'SUMMARY — สรุปทุก ' + s.interval + ' นาที', CUTOFF: 'CUTOFF — ส่งเฉพาะตอนปิดรอบ' };
+        el.innerHTML = '<div class="grid-2-even"><div class="card card-body"><div class="row-between"><div class="card-title">' + icon('message') + 'LINE Connection</div>' +
+          (s.connected ? '<span class="status status-OPEN">Connected</span>' : '<span class="status status-CLOSED">Not Connected</span>') + '</div>' +
+          '<div class="detail-list"><div class="summary-row"><span class="muted">Channel Access Token</span><b class="mono">' + (s.tokenSet ? esc(s.tokenMasked) : '<span style="color:var(--danger)">ยังไม่ได้ตั้งค่า</span>') + '</b></div>' +
+          '<div class="summary-row"><span class="muted">Channel Secret</span><b>' + (s.secretSet ? 'ตั้งค่าแล้ว' : '<span class="muted">ไม่ได้ตั้งค่า (ไม่บังคับ)</span>') + '</b></div>' +
+          '<div class="summary-row"><span class="muted">Target ID (Group/User)</span><b class="mono">' + (s.targetSet ? esc(s.targetId) : '<span style="color:var(--danger)">ยังไม่ได้ตั้งค่า</span>') + '</b></div>' +
+          '<div class="summary-row"><span class="muted">Notification Mode</span><b>' + esc(modeTh[s.mode] || s.mode) + '</b></div>' +
+          '<div class="summary-row"><span class="muted">การส่ง LINE</span><b>' + (s.enabled ? 'เปิด' : 'ปิด') + '</b></div>' +
+          '<div class="summary-row"><span class="muted">ส่งสำเร็จล่าสุด</span><b>' + esc(s.lastSent ? formatDateTime(s.lastSent) : '-') + '</b></div></div>' +
+          '<div class="row row-wrap mt-16"><button class="btn btn-success" id="lnTest"' + (s.connected ? '' : ' disabled') + '>' + icon('send') + '<span>ทดสอบส่ง LINE</span></button><button class="btn btn-outline" id="lnSettings">' + icon('settings') + '<span>ตั้งค่าโหมดแจ้งเตือน</span></button></div></div>' +
+          '<div class="card card-body"><div class="card-title mb-12">' + icon('info') + 'วิธีตั้งค่า</div><ol style="padding-left:20px;margin:0;line-height:1.85" class="text-sm">' +
+          '<li>สร้าง LINE Official Account และเปิด Messaging API ที่ LINE Developers Console</li><li>คัดลอก <b>Channel access token (long-lived)</b></li>' +
+          '<li>Apps Script → Project Settings → Script Properties เพิ่ม <span class="mono">LINE_CHANNEL_ACCESS_TOKEN</span>, <span class="mono">LINE_TARGET_ID</span> (และ <span class="mono">LINE_CHANNEL_SECRET</span>)</li>' +
+          '<li>เชิญบอทเข้ากลุ่มครัว แล้วหา Group ID (ดู LINE_SETUP.md)</li><li>กด "ทดสอบส่ง LINE"</li></ol>' +
+          '<p class="muted text-sm mt-12">ระบบไม่แสดง Token เต็มเพื่อความปลอดภัย · Token ตั้งได้ผ่าน Script Properties เท่านั้น</p></div></div>' +
+          '<div class="card mt-16"><div class="card-header"><div class="card-title">' + icon('list') + 'Notification Queue</div><div class="row"><span class="badge badge-success">ส่งแล้ว ' + (s.queue.SENT || 0) + '</span><span class="badge badge-primary">รอส่ง ' + ((s.queue.PENDING || 0) + (s.queue.PROCESSING || 0)) + '</span><span class="badge badge-warning">Retry ' + (s.queue.RETRY || 0) + '</span><span class="badge badge-danger">Failed ' + (s.queue.FAILED || 0) + '</span></div></div>' +
+          '<div class="filter-pills">' + [['', 'ทั้งหมด'], ['PENDING', 'รอส่ง'], ['RETRY', 'Retry'], ['FAILED', 'Failed'], ['SENT', 'ส่งแล้ว']].map(function (p) { return '<button class="pill' + (state.status === p[0] ? ' active' : '') + '" data-qs="' + p[0] + '">' + p[1] + '</button>'; }).join('') + '</div>' +
+          '<div class="table-wrap mt-12">' + (q.rows.length ? '<table class="table"><thead><tr><th>เวลา</th><th>ประเภท</th><th>ข้อความ</th><th>สถานะ</th><th class="num">Retry</th><th>ข้อผิดพลาด</th><th class="actions"></th></tr></thead><tbody>' + q.rows.map(function (n) {
+            return '<tr><td class="nowrap text-sm">' + esc(formatDateTime(n.created_at)) + (n.sent_at ? '<div class="text-xs muted">ส่ง ' + esc(formatTime(n.sent_at)) + '</div>' : '') + '</td><td><span class="badge">' + esc(n.type) + '</span></td><td class="text-sm" style="max-width:340px;white-space:pre-line">' + esc(n.text.length > 160 ? n.text.substring(0, 160) + '…' : n.text) + '</td><td>' + renderStatus(n.status) + '</td><td class="num">' + n.retry_count + '</td><td class="text-xs" style="max-width:220px;color:var(--danger-700)">' + esc(n.last_error) + '</td>' +
+              '<td class="actions">' + (n.status === 'FAILED' || n.status === 'RETRY' ? '<button class="btn btn-outline btn-sm" data-retry="' + esc(n.notification_id) + '">' + icon('refresh', 'icon-sm') + '<span>Retry</span></button>' : '') + '</td></tr>';
+          }).join('') + '</tbody></table>' : emptyState('ยังไม่มีข้อความในคิว', '', 'message')) + '</div></div>';
+        var t = $('#lnTest');
+        t.onclick = function () { guard(t, function () { return apiCall('line.test').then(function (r) { showToast(r.message, 'success'); return load(); }).catch(function (e) { if (!e.handled) showToast(e.message, 'error', 8000); return load(); }); }); };
+        $('#lnSettings').onclick = function () { Desk.go('settings'); };
+        $all('[data-qs]', el).forEach(function (b) { b.onclick = function () { state.status = b.dataset.qs; load(); }; });
+        $all('[data-retry]', el).forEach(function (b) { b.onclick = function () { guard(b, function () { return apiCall('noti.retry', { notification_id: b.dataset.retry }).then(function (r) { showToast(r.result.sent ? 'ส่งสำเร็จ' : 'ส่งไม่สำเร็จ จะลองใหม่อัตโนมัติ', r.result.sent ? 'success' : 'warning'); return load(); }); }); }; });
+      }).catch(function (e) { if (!e.handled) el.innerHTML = errorBlock(e); });
+    };
+    load();
+  }
+});
+
+/* ---------------- 19 Audit Log / 20 Error & System Log ---------------- */
+function LogPage(el, cfg) {
+  var state = { tab: cfg.tabs[0].key, q: '', date: '', page: 1 };
+  el.innerHTML = '<div class="card">' + (cfg.tabs.length > 1 ? '<div class="filter-pills">' + cfg.tabs.map(function (t) { return '<button class="pill' + (t.key === state.tab ? ' active' : '') + '" data-lt="' + t.key + '">' + esc(t.label) + '</button>'; }).join('') + '</div>' : '') +
+    '<div class="toolbar"><div class="input-icon search">' + icon('search') + '<input class="form-control form-control-sm" id="lgQ" type="search" placeholder="ค้นหา..." aria-label="ค้นหา log"></div><input type="date" class="form-control form-control-sm" id="lgDate" aria-label="วันที่" style="width:auto"><span class="grow"></span><button class="btn btn-soft btn-sm" id="lgRefresh">' + icon('refresh', 'icon-sm') + '<span>รีเฟรช</span></button></div><div id="lgTable">' + skeleton(4) + '</div></div>';
+  var load = function () {
+    var t = cfg.tabs.filter(function (x) { return x.key === state.tab; })[0];
+    return apiCall(t.action, { q: state.q, date: state.date, page: state.page, pageSize: 50 }).then(function (d) {
+      var box = $('#lgTable');
+      if (!box) return;
+      if (!d.rows.length) { box.innerHTML = emptyState('ไม่พบข้อมูล', state.q || state.date ? 'ลองเปลี่ยนเงื่อนไขการค้นหา' : 'ยังไม่มีบันทึก', 'shield'); return; }
+      box.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr>' + t.cols.map(function (c) { return '<th>' + esc(c[1]) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+        d.rows.map(function (r) { return '<tr>' + t.cols.map(function (c) { var v = r[c[0]]; if (c[0] === 'timestamp') return '<td class="nowrap text-sm">' + esc(formatDateTime(v)) + '</td>'; return '<td class="text-sm" style="max-width:320px;word-break:break-word">' + esc(v && String(v).length > 300 ? String(v).substring(0, 300) + '…' : v) + '</td>'; }).join('') + '</tr>'; }).join('') +
+        '</tbody></table></div>' + pagerHtml(d.page, Math.max(1, Math.ceil(d.total / d.pageSize)), d.total);
+      bindPager(box, function (p) { state.page = p; load(); });
+    }).catch(function (e) { if (!e.handled) $('#lgTable').innerHTML = errorBlock(e); });
+  };
+  $all('[data-lt]', el).forEach(function (b) { b.onclick = function () { state.tab = b.dataset.lt; state.page = 1; $all('[data-lt]', el).forEach(function (x) { x.classList.toggle('active', x === b); }); load(); }; });
+  $('#lgQ').oninput = debounce(function () { state.q = $('#lgQ').value.trim(); state.page = 1; load(); }, 350);
+  $('#lgDate').onchange = function () { state.date = this.value; state.page = 1; load(); };
+  $('#lgRefresh').onclick = function () { guard(this, load); };
+  load();
+}
+Desk.register('audit', {
+  title: 'Audit Log', icon: 'shield', roles: ['ADMIN'],
+  render: function (el) {
+    LogPage(el, { tabs: [{ key: 'audit', label: 'Audit', action: 'log.audit', cols: [['timestamp', 'เวลา'], ['user_code', 'ผู้ใช้'], ['role', 'Role'], ['action', 'Action'], ['module', 'Module'], ['target_id', 'Target'], ['old_value', 'ค่าเดิม'], ['new_value', 'ค่าใหม่'], ['request_id', 'Request']] }] });
+  }
+});
+Desk.register('logs', {
+  title: 'System Log', icon: 'alert', roles: ['ADMIN'],
+  render: function (el) {
+    LogPage(el, { tabs: [
+      { key: 'error', label: 'Error Log', action: 'log.error', cols: [['timestamp', 'เวลา'], ['error_code', 'Code'], ['module', 'Module'], ['function_name', 'Function'], ['user_id', 'User'], ['error_message', 'ข้อความ'], ['request_id', 'Request'], ['stack', 'Stack']] },
+      { key: 'system', label: 'System Log', action: 'log.system', cols: [['timestamp', 'เวลา'], ['level', 'Level'], ['module', 'Module'], ['event', 'Event'], ['message', 'ข้อความ'], ['data', 'Data']] }
+    ] });
+  }
+});
+
+/* ---------------- 18 System Settings ---------------- */
+Desk.register('settings', {
+  title: 'ตั้งค่าระบบ', icon: 'settings', roles: ['ADMIN'],
+  render: function (el) {
+    var groups = [
+      { title: 'ทั่วไป', icon: 'settings', keys: ['COMPANY_NAME', 'DEPARTMENTS', 'MENU_CATEGORIES', 'PAYMENT_METHOD'] },
+      { title: 'การสั่งอาหาร', icon: 'cart', keys: ['MAX_QTY_PER_ORDER', 'ALLOW_EDIT', 'ALLOW_CANCEL', 'ALLOW_MULTIPLE_ORDERS', 'AUTO_NO_SHOW'] },
+      { title: 'มื้ออาหารอัตโนมัติ', icon: 'clock', keys: ['AUTO_CREATE_WINDOW', 'AUTO_DAILY_MENU', 'DEFAULT_MEALS', 'WORKING_DAYS', 'LUNCH_OPEN_TIME', 'LUNCH_CLOSE_TIME', 'LUNCH_PICKUP_START', 'LUNCH_PICKUP_END', 'BREAKFAST_OPEN_TIME', 'BREAKFAST_CLOSE_TIME', 'BREAKFAST_PICKUP_START', 'BREAKFAST_PICKUP_END', 'DINNER_OPEN_TIME', 'DINNER_CLOSE_TIME', 'DINNER_PICKUP_START', 'DINNER_PICKUP_END'] },
+      { title: 'LINE Notification', icon: 'message', keys: ['LINE_ENABLED', 'LINE_NOTIFICATION_MODE', 'SUMMARY_INTERVAL_MINUTES', 'LINE_WEBHOOK_CAPTURE'] },
+      { title: 'ความปลอดภัย', icon: 'lock', keys: ['SESSION_TIMEOUT_MINUTES', 'REMEMBER_DAYS', 'LOGIN_MAX_ATTEMPTS', 'LOGIN_LOCK_MINUTES', 'PIN_MIN_LENGTH'] },
+      { title: 'Scheduler และ Backup', icon: 'database', keys: ['SCHEDULER_INTERVAL_MINUTES', 'BACKUP_ENABLED', 'BACKUP_HOUR', 'BACKUP_RETENTION_DAYS'] }
+    ];
+    var labels = { COMPANY_NAME: 'ชื่อบริษัท', DEPARTMENTS: 'แผนก', MENU_CATEGORIES: 'หมวดหมู่เมนู', PAYMENT_METHOD: 'วิธีชำระเงิน', MAX_QTY_PER_ORDER: 'Max Qty ต่อ Order (0 = ไม่จำกัด)', ALLOW_EDIT: 'อนุญาตแก้ไข Order', ALLOW_CANCEL: 'อนุญาตยกเลิก Order', ALLOW_MULTIPLE_ORDERS: 'สั่งได้หลาย Order ต่อมื้อ', AUTO_NO_SHOW: 'ไม่มารับอัตโนมัติ (NO_SHOW)', AUTO_CREATE_WINDOW: 'สร้างมื้ออัตโนมัติทุกวัน', AUTO_DAILY_MENU: 'ใส่เมนูอัตโนมัติ', DEFAULT_MEALS: 'มื้อที่สร้างอัตโนมัติ', WORKING_DAYS: 'วันทำงาน', LUNCH_OPEN_TIME: 'กลางวัน: Default Open Time', LUNCH_CLOSE_TIME: 'กลางวัน: Default Close Time', LUNCH_PICKUP_START: 'กลางวัน: Pickup Start', LUNCH_PICKUP_END: 'กลางวัน: Pickup End', BREAKFAST_OPEN_TIME: 'เช้า: เปิดรับ', BREAKFAST_CLOSE_TIME: 'เช้า: ปิดรับ', BREAKFAST_PICKUP_START: 'เช้า: เริ่มรับอาหาร', BREAKFAST_PICKUP_END: 'เช้า: สิ้นสุดรับอาหาร', DINNER_OPEN_TIME: 'เย็น: เปิดรับ', DINNER_CLOSE_TIME: 'เย็น: ปิดรับ', DINNER_PICKUP_START: 'เย็น: เริ่มรับอาหาร', DINNER_PICKUP_END: 'เย็น: สิ้นสุดรับอาหาร', LINE_ENABLED: 'เปิดการส่ง LINE', LINE_NOTIFICATION_MODE: 'LINE Notification Mode', SUMMARY_INTERVAL_MINUTES: 'Summary Interval (นาที)', LINE_WEBHOOK_CAPTURE: 'บันทึก Group ID จาก Webhook', SESSION_TIMEOUT_MINUTES: 'Session Timeout (นาที)', REMEMBER_DAYS: 'จำการเข้าสู่ระบบ (วัน)', LOGIN_MAX_ATTEMPTS: 'ใส่ PIN ผิดได้ (ครั้ง)', LOGIN_LOCK_MINUTES: 'ล็อกบัญชี (นาที)', PIN_MIN_LENGTH: 'ความยาว PIN ขั้นต่ำ', SCHEDULER_INTERVAL_MINUTES: 'Scheduler ทุก (นาที)', BACKUP_ENABLED: 'Backup Enabled', BACKUP_HOUR: 'เวลา Backup (ชั่วโมง)', BACKUP_RETENTION_DAYS: 'เก็บ Backup (วัน, 0=ทั้งหมด)' };
+    var load = function () {
+      return apiCall('settings.get').then(function (d) {
+        if (Desk.current !== 'settings') return;
+        var byKey = {};
+        d.items.forEach(function (i) { byKey[i.key] = i; });
+        var field = function (key) {
+          var it = byKey[key];
+          if (!it) return '';
+          var base = { name: key, label: labels[key] || key, value: it.value, hint: it.description };
+          if (it.type === 'bool') return formField(Object.assign(base, { type: 'switch', value: it.value === 'TRUE', switchLabel: 'เปิด' }));
+          if (it.type === 'time') return formField(Object.assign(base, { type: 'time' }));
+          if (it.type === 'notimode') return formField(Object.assign(base, { type: 'select', options: [{ value: 'SUMMARY', label: 'SUMMARY (แนะนำ)' }, { value: 'INSTANT', label: 'INSTANT' }, { value: 'CUTOFF', label: 'CUTOFF' }] }));
+          if (it.type === 'interval') return formField(Object.assign(base, { type: 'select', options: ['1', '5', '10', '15', '30'] }));
+          if (it.type === 'int' || it.type === 'hour') return formField(Object.assign(base, { type: 'number', min: 0, inputmode: 'numeric' }));
+          return formField(base);
+        };
+        var props = d.scriptProperties;
+        var tr = d.triggers || { installed: [], missing: [] };
+        el.innerHTML = '<div class="page-head"><div class="muted">Timezone: <b>' + esc(d.timezone) + '</b> · เวอร์ชัน ' + esc(d.version) + '</div><div class="ph-actions"><button class="btn btn-primary" id="stSave">' + icon('check') + '<span>บันทึกการตั้งค่า</span></button></div></div>' +
+          '<form id="stForm" novalidate><div class="grid-2-even">' + groups.map(function (g) {
+            return '<div class="card card-body"><div class="card-title mb-12">' + icon(g.icon) + esc(g.title) + '</div><div class="form-grid">' + g.keys.map(field).join('') + '</div></div>';
+          }).join('') + '</div></form>' +
+          '<div class="grid-2-even mt-16"><div class="card card-body"><div class="card-title mb-12">' + icon('clock') + 'Triggers</div>' +
+          (tr.missing && tr.missing.length ? '<div class="alert alert-warning">' + icon('alert') + '<div>ยังไม่ได้ติดตั้ง: ' + esc(tr.missing.join(', ')) + '</div></div>' : '<div class="alert alert-success">' + icon('checkCircle') + '<div>ติดตั้ง Trigger ครบแล้ว (' + tr.installed.length + ')</div></div>') +
+          '<p class="text-sm muted">Scheduler ทำงานล่าสุด: ' + esc(tr.lastRun ? formatDateTime(tr.lastRun) : '-') + '</p><button class="btn btn-outline mt-12" id="stTrig">' + icon('refresh') + '<span>ติดตั้ง/อัปเดต Trigger</span></button></div>' +
+          '<div class="card card-body"><div class="card-title mb-12">' + icon('key') + 'Script Properties</div><div class="detail-list">' + Object.keys(props).map(function (k) {
+            return '<div class="summary-row"><span class="mono text-sm">' + esc(k) + '</span>' + (props[k] ? '<span class="badge badge-success">ตั้งค่าแล้ว</span>' : '<span class="badge">ยังไม่ได้ตั้งค่า</span>') + '</div>';
+          }).join('') + '</div><p class="muted text-sm mt-12">ค่าลับตั้งได้ที่ Apps Script → Project Settings → Script Properties เท่านั้น</p></div></div>' +
+          '<div class="card card-body mt-16"><div class="card-title mb-12">' + icon('trash') + 'ข้อมูลตัวอย่าง (Demo)</div><p class="muted text-sm">ลบพนักงาน/เมนู/มื้อที่สร้างจาก seedSampleData() — ไม่กระทบ Config และข้อมูลจริง (ข้อมูลที่ถูกใช้งานแล้วจะถูกปิดใช้งานแทนการลบ)</p><button class="btn btn-outline-danger mt-12" id="stSample">' + icon('trash') + '<span>ล้างข้อมูลตัวอย่าง</span></button></div>';
+        var save = $('#stSave');
+        save.onclick = function () {
+          var vals = readForm($('#stForm'));
+          Object.keys(vals).forEach(function (k) { if (typeof vals[k] === 'boolean') vals[k] = vals[k] ? 'TRUE' : 'FALSE'; });
+          guard(save, function () { return apiCall('settings.save', { values: vals }).then(function (r) { showToast(r.changed ? 'บันทึกแล้ว ' + r.changed + ' รายการ' + (r.triggerMsg ? ' · ' + r.triggerMsg : '') : 'ไม่มีการเปลี่ยนแปลง', 'success'); return apiCall('auth.me').then(function (m) { App.state.app = m.app; }); }); });
+        };
+        var trig = $('#stTrig');
+        trig.onclick = function () { guard(trig, function () { return apiCall('trigger.install').then(function () { showToast('ติดตั้ง Trigger เรียบร้อย', 'success'); return load(); }); }); };
+        var smp = $('#stSample');
+        smp.onclick = function () {
+          confirmModal('ล้างข้อมูลตัวอย่างทั้งหมด?', { danger: true, okText: 'ล้างข้อมูลตัวอย่าง', detail: 'Config และข้อมูลจริงจะไม่ถูกลบ' }).then(function (ok) {
+            if (ok) guard(smp, function () { return apiCall('sample.clear').then(function (r) { showToast('ล้างข้อมูลตัวอย่างแล้ว (พนักงาน ' + (r.employees_deleted + r.employees_disabled) + ', เมนู ' + (r.menus_deleted + r.menus_soft_deleted) + ')', 'success'); }); });
+          });
+        };
+      }).catch(function (e) { if (!e.handled) el.innerHTML = errorBlock(e); });
+    };
+    load();
+  }
+});
+
+/* ---------------- 21 Backup ---------------- */
+Desk.register('backup', {
+  title: 'Backup', icon: 'database', roles: ['ADMIN'],
+  render: function (el) {
+    var load = function () {
+      return apiCall('backup.list').then(function (d) {
+        if (Desk.current !== 'backup') return;
+        el.innerHTML = '<div class="grid-3 mb-16">' + kpiCard('Backup อัตโนมัติ', d.enabled ? 'เปิด' : 'ปิด', 'clock', d.enabled ? 'success' : 'danger', 'ทุกวันเวลา ' + pad2(d.hour) + ':00 น.') +
+          kpiCard('ไฟล์ล่าสุด', d.rows.length ? formatTime(d.rows[0].created_at) : '-', 'database', '', d.rows.length ? formatDate(d.rows[0].created_at, true) : 'ยังไม่มี Backup') +
+          kpiCard('การเก็บรักษา', d.retentionDays ? d.retentionDays + ' วัน' : 'เก็บทั้งหมด', 'shield', 'navy') + '</div>' +
+          '<div class="card"><div class="card-header"><div class="card-title">' + icon('database') + 'ไฟล์ Backup (2 เดือนล่าสุด)</div><div class="row"><a class="btn btn-outline btn-sm" href="' + safeUrl(d.folderUrl) + '" target="_blank" rel="noopener">' + icon('file', 'icon-sm') + '<span>เปิดโฟลเดอร์</span></a><button class="btn btn-primary btn-sm" id="bkNow">' + icon('download', 'icon-sm') + '<span>Backup ตอนนี้</span></button></div></div>' +
+          '<div class="table-wrap mt-12">' + (d.rows.length ? '<table class="table"><thead><tr><th>ชื่อไฟล์</th><th>สร้างเมื่อ</th><th class="actions"></th></tr></thead><tbody>' + d.rows.map(function (f) {
+            return '<tr><td class="mono text-sm">' + esc(f.name) + '</td><td>' + esc(formatDateTime(f.created_at)) + '</td><td class="actions"><a class="btn btn-outline btn-sm" href="' + safeUrl(f.url) + '" target="_blank" rel="noopener">เปิด</a></td></tr>';
+          }).join('') + '</tbody></table>' : emptyState('ยังไม่มีไฟล์ Backup', 'กด "Backup ตอนนี้" เพื่อสำรองข้อมูลครั้งแรก', 'database')) + '</div>' +
+          '<div class="card-body text-sm muted">โครงสร้างโฟลเดอร์: FoodFactory-Backup / YYYY / MM / FoodFactory-DB_YYYY-MM-DD_HHmmss — ทุกครั้งสร้างไฟล์ใหม่ ไม่เขียนทับไฟล์เดิม</div></div>';
+        var b = $('#bkNow');
+        b.onclick = function () {
+          confirmModal('สำรองฐานข้อมูลตอนนี้?', { okText: 'Backup', icon: 'database' }).then(function (ok) {
+            if (ok) guard(b, function () { return apiCall('backup.run', {}, { loading: 'กำลังสำรองข้อมูล...' }).then(function (r) { showToast('สำรองข้อมูลแล้ว: ' + r.name, 'success'); return load(); }); });
+          });
+        };
+      }).catch(function (e) { if (!e.handled) el.innerHTML = errorBlock(e); });
+    };
+    load();
+  }
+});
+</script>
