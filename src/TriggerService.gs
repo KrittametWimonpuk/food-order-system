@@ -90,6 +90,7 @@ function runScheduler() {
   var report = {};
   runStep_('ensureWindows', function () { return ensureWindowsForDate(todayStr()); }, report);
   runStep_('syncStatuses', syncWindowStatuses, report);
+  runStep_('fillDailyMenus', fillMissingDailyMenus, report);
   runStep_('summaries', enqueueDueSummaries, report);
   runStep_('queue', function () { return processNotificationQueue(20); }, report);
   setScriptProp('SCHEDULER_LAST_RUN', nowStr());

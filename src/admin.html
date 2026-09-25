@@ -7,6 +7,15 @@
 'use strict';
 
 function isAdmin() { return App.state.user.role === 'ADMIN'; }
+/** Toast suffix describing how a menu change was applied to upcoming meals. */
+function syncNote(sync) {
+  if (!sync || !sync.windows) return '';
+  var parts = [];
+  if (sync.added) parts.push('เพิ่มเข้า ' + sync.added + ' มื้อที่เปิดอยู่');
+  if (sync.updated) parts.push('อัปเดต ' + sync.updated + ' มื้อ');
+  if (sync.removed) parts.push('ปิดขายใน ' + sync.removed + ' มื้อ');
+  return parts.length ? ' · ' + parts.join(' · ') : '';
+}
 
 /* ---------------- 10 Admin Dashboard ---------------- */
 Desk.register('a-dashboard', {
@@ -72,7 +81,7 @@ Desk.register('menu', {
           c.onchange = function () {
             var on = c.checked;
             c.disabled = true;
-            apiCall('menu.toggle', { item_id: c.dataset.toggle, status: on ? 'ACTIVE' : 'INACTIVE' }).then(function () { showToast(on ? 'เปิดใช้งานเมนูแล้ว' : 'ปิดใช้งานเมนูแล้ว', 'success', 2000); })
+            apiCall('menu.toggle', { item_id: c.dataset.toggle, status: on ? 'ACTIVE' : 'INACTIVE' }).then(function (r) { showToast((on ? 'เปิดใช้งานเมนูแล้ว' : 'ปิดใช้งานเมนูแล้ว') + syncNote(r.sync), 'success', 4000); })
               .catch(function (e) { c.checked = !on; if (!e.handled) showToast(e.message, 'error'); }).then(function () { c.disabled = false; });
           };
         });
@@ -108,7 +117,7 @@ Desk.register('menu', {
           if (!checkRequired(body)) return;
           var v = readForm(body);
           v.item_id = m.item_id || '';
-          return apiCall('menu.save', v).then(function () { modal.close(); showToast('บันทึกเมนูแล้ว', 'success'); return load(); });
+          return apiCall('menu.save', v).then(function (r) { modal.close(); showToast('บันทึกเมนูแล้ว' + syncNote(r.sync), 'success', 5000); return load(); });
         } }]
       });
       preview();

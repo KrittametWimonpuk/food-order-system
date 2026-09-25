@@ -113,9 +113,11 @@ function saveMenuItem(user, p) {
         fields.code = code;
       }
       fields.updated_at = now;
+      var before = { status: item.status, name: item.name, default_price: item.default_price, default_stock: item.default_stock, max_per_order: item.max_per_order };
       var d = diffFields(item, fields, Object.keys(fields).filter(function (k) { return k !== 'updated_at'; }));
       dbUpdate('MENU_ITEMS', item, fields);
       if (d.changed) writeAudit(user, 'UPDATE_MENU', 'MENU', item.code, d.old, d.new);
+      item._sync = syncItemToUpcomingWindows_(item, before);
       return item;
     }
     if (!code) code = nextMenuCode_();
@@ -128,33 +130,41 @@ function saveMenuItem(user, p) {
     fields.is_sample = 'FALSE';
     var row = dbInsert('MENU_ITEMS', fields);
     writeAudit(user, 'CREATE_MENU', 'MENU', code, '', { name: name, price: fields.default_price, stock: stock });
+    row._sync = syncItemToUpcomingWindows_(row, null);
     return row;
   });
   invalidateMenuCache();
-  return { item: stripInternal(res) };
+  return { item: stripInternal(res), sync: res._sync };
 }
 
 /** Enables / disables a menu master item. */
 function toggleMenuItem(user, p) {
   var status = String(p && p.status || '').toUpperCase();
   assert(status === 'ACTIVE' || status === 'INACTIVE', 'VALIDATION_ERROR', 'สถานะไม่ถูกต้อง');
-  var item = dbFindOne('MENU_ITEMS', 'item_id', String(p.item_id || ''));
-  assert(item && !toBool(item.is_deleted), 'MENU_NOT_FOUND');
-  var old = item.status;
-  dbUpdate('MENU_ITEMS', item, { status: status, updated_at: nowStr() });
+  var res = withLock(function () {
+    var item = dbFindOne('MENU_ITEMS', 'item_id', String(p.item_id || ''));
+    assert(item && !toBool(item.is_deleted), 'MENU_NOT_FOUND');
+    var before = { status: item.status, name: item.name, default_price: item.default_price, default_stock: item.default_stock, max_per_order: item.max_per_order };
+    dbUpdate('MENU_ITEMS', item, { status: status, updated_at: nowStr() });
+    writeAudit(user, 'TOGGLE_MENU', 'MENU', item.code, before.status, status);
+    return { item: item, sync: syncItemToUpcomingWindows_(item, before) };
+  });
   invalidateMenuCache();
-  writeAudit(user, 'TOGGLE_MENU', 'MENU', item.code, old, status);
-  return { item: stripInternal(item) };
+  return { item: stripInternal(res.item), sync: res.sync };
 }
 
 /** Soft-deletes a menu master item. */
 function deleteMenuItem(user, p) {
-  var item = dbFindOne('MENU_ITEMS', 'item_id', String(p && p.item_id || ''));
-  assert(item && !toBool(item.is_deleted), 'MENU_NOT_FOUND');
-  dbUpdate('MENU_ITEMS', item, { is_deleted: 'TRUE', status: 'INACTIVE', updated_at: nowStr() });
+  var sync = withLock(function () {
+    var item = dbFindOne('MENU_ITEMS', 'item_id', String(p && p.item_id || ''));
+    assert(item && !toBool(item.is_deleted), 'MENU_NOT_FOUND');
+    var before = { status: item.status, name: item.name, default_price: item.default_price, default_stock: item.default_stock, max_per_order: item.max_per_order };
+    dbUpdate('MENU_ITEMS', item, { is_deleted: 'TRUE', status: 'INACTIVE', updated_at: nowStr() });
+    writeAudit(user, 'DELETE_MENU', 'MENU', item.code, item.name, 'is_deleted=TRUE');
+    return syncItemToUpcomingWindows_(item, before);
+  });
   invalidateMenuCache();
-  writeAudit(user, 'DELETE_MENU', 'MENU', item.code, item.name, 'is_deleted=TRUE');
-  return { deleted: true };
+  return { deleted: true, sync: sync };
 }
 
 /** Restores a soft-deleted menu master item. */
@@ -191,6 +201,96 @@ function uploadMenuImage(user, p) {
   var url = 'https://drive.google.com/thumbnail?id=' + file.getId() + '&sz=w800';
   writeAudit(user, 'UPLOAD_MENU_IMAGE', 'MENU', file.getId(), '', name);
   return { url: url, fileId: file.getId(), shared: shared };
+}
+
+/**
+ * Keeps upcoming meal windows (DRAFT/OPEN, cutoff not passed) in sync with a
+ * menu master change so admins don't have to edit each day's menu by hand
+ * (caller holds the lock). Past/closed windows are never touched.
+ *  - item ACTIVE: add it to windows that don't have it (AUTO_DAILY_MENU);
+ *    when it was just re-activated, re-open rows the master had closed;
+ *    name/price/stock/max follow the master unless the day was customised
+ *    (row value differs from the old master default).
+ *  - item INACTIVE or deleted: stop selling it (REMOVED if unsold, else DISABLED).
+ * @param {Object} item menu master row (after the change)
+ * @param {Object|null} before master values before the change (null = new item)
+ * @return {{added:number, updated:number, removed:number, windows:number}}
+ */
+function syncItemToUpcomingWindows_(item, before) {
+  var out = { added: 0, updated: 0, removed: 0, windows: 0 };
+  var now = nowStr();
+  var windows = dbAll('MEAL_WINDOWS').filter(function (w) {
+    var st = computeWindowStatus(w, now);
+    return (st === WINDOW_STATUS.DRAFT || st === WINDOW_STATUS.OPEN) && w.close_at > now;
+  });
+  if (!windows.length) return out;
+  out.windows = windows.length;
+  var byWindow = {};
+  dbAll('DAILY_MENU').forEach(function (d) { if (d.item_id === item.item_id) byWindow[d.window_id] = d; });
+  var active = item.status === 'ACTIVE' && !toBool(item.is_deleted);
+  var reactivated = active && before && before.status !== 'ACTIVE';
+  var inserts = [], updates = [];
+  windows.forEach(function (w) {
+    var d = byWindow[w.window_id];
+    if (!active) {
+      if (d && (d.status === 'AVAILABLE' || d.status === 'SOLD_OUT')) {
+        updates.push({ row: d, changes: { status: toInt(d.sold_qty) > 0 ? 'DISABLED' : 'REMOVED', updated_at: now } });
+        out.removed++;
+      }
+      return;
+    }
+    if (!d) {
+      if (cfgBool('AUTO_DAILY_MENU')) { inserts.push(newDailyRow_(w, item, now)); out.added++; }
+      return;
+    }
+    var ch = {};
+    if (reactivated && (d.status === 'REMOVED' || d.status === 'DISABLED')) ch.status = 'AVAILABLE';
+    if (d.item_name !== item.name) ch.item_name = item.name;
+    if (before) {
+      if (toNum(d.price) === toNum(before.default_price) && toNum(item.default_price) !== toNum(before.default_price)) ch.price = toNum(item.default_price);
+      if (toInt(d.stock_limit) === toInt(before.default_stock) && toInt(item.default_stock) !== toInt(before.default_stock)) {
+        ch.stock_limit = Math.max(toInt(item.default_stock), toInt(d.sold_qty));
+      }
+      if (toInt(d.max_per_order) === toInt(before.max_per_order) && toInt(item.max_per_order) !== toInt(before.max_per_order)) ch.max_per_order = toInt(item.max_per_order);
+    }
+    if (Object.keys(ch).length) {
+      ch.updated_at = now;
+      updates.push({ row: d, changes: ch });
+      if (ch.status === 'AVAILABLE' && d.status !== 'AVAILABLE') out.added++; else out.updated++;
+    }
+  });
+  dbInsertMany('DAILY_MENU', inserts);
+  if (updates.length) dbUpdateMany('DAILY_MENU', updates);
+  return out;
+}
+
+/**
+ * Scheduler self-heal: adds ACTIVE master items that are missing from upcoming
+ * windows (DRAFT/OPEN). Items an admin removed from a day keep their REMOVED
+ * row and are therefore not re-added. No-op when AUTO_DAILY_MENU is off.
+ * @return {number} rows added
+ */
+function fillMissingDailyMenus() {
+  if (!cfgBool('AUTO_DAILY_MENU')) return 0;
+  var now = nowStr();
+  var isUpcoming = function (w) {
+    var st = computeWindowStatus(w, now);
+    return (st === WINDOW_STATUS.DRAFT || st === WINDOW_STATUS.OPEN) && w.close_at > now;
+  };
+  if (!dbAll('MEAL_WINDOWS').some(isUpcoming)) return 0;
+  return withLock(function () {
+    var windows = dbAll('MEAL_WINDOWS').filter(isUpcoming);
+    var have = {};
+    dbAll('DAILY_MENU').forEach(function (d) { have[d.window_id + '|' + d.item_id] = true; });
+    var items = dbAll('MENU_ITEMS').filter(function (m) { return m.status === 'ACTIVE' && !toBool(m.is_deleted); });
+    var inserts = [];
+    windows.forEach(function (w) {
+      items.forEach(function (m) { if (!have[w.window_id + '|' + m.item_id]) inserts.push(newDailyRow_(w, m, now)); });
+    });
+    dbInsertMany('DAILY_MENU', inserts);
+    if (inserts.length) systemLog('INFO', 'MENU', 'FILL_DAILY_MENU', 'เพิ่มเมนูที่ขาดเข้ามื้อที่เปิดอยู่ ' + inserts.length + ' รายการ');
+    return inserts.length;
+  });
 }
 
 /* ------------------------------------------------------------------------- */

@@ -524,3 +524,43 @@ test('meal windows: edit a completed window re-opens it; soft delete + recreate'
   const hdr = env.sheetHeader('04_MEAL_WINDOWS');
   assert.ok(env.sheetRows('04_MEAL_WINDOWS').some((r) => r[hdr.indexOf('window_id')] === w0.window_id && r[hdr.indexOf('status')] === 'DELETED'));
 });
+
+test('menu master changes reach upcoming meals; scheduler fills missing menus', () => {
+  const { env, pins } = setup();
+  env.setNow('2026-09-25 08:30');
+  const a = loginAdmin(env);
+  const t = login(env, 'EMP00125', pins.EMP00125);
+  const names = () => ok(env.api('employee.home', {}, t)).menu.map((m) => m.name);
+  assert.equal(names().length, 4);
+  // New menu appears for employees immediately
+  const r = ok(env.api('menu.save', { name: 'ข้าวกะเพราหมึก', default_price: 55, default_stock: 50, status: 'ACTIVE' }, a));
+  assert.equal(r.sync.added, 1);
+  assert.ok(names().includes('ข้าวกะเพราหมึก'));
+  // Turning it off hides it; turning it on brings it back
+  ok(env.api('menu.toggle', { item_id: r.item.item_id, status: 'INACTIVE' }, a));
+  assert.ok(!names().includes('ข้าวกะเพราหมึก'));
+  ok(env.api('menu.toggle', { item_id: r.item.item_id, status: 'ACTIVE' }, a));
+  assert.ok(names().includes('ข้าวกะเพราหมึก'));
+  // Master price edit follows to today's (uncustomised) daily menu; customised price is kept
+  ok(env.api('menu.save', { item_id: r.item.item_id, name: 'ข้าวกะเพราหมึก', default_price: 60, default_stock: 50, status: 'ACTIVE' }, a));
+  assert.equal(ok(env.api('employee.home', {}, t)).menu.find((m) => m.name === 'ข้าวกะเพราหมึก').price, 60);
+  // Delete hides it
+  ok(env.api('menu.delete', { item_id: r.item.item_id }, a));
+  assert.ok(!names().includes('ข้าวกะเพราหมึก'));
+  // Legacy data: a menu that is ACTIVE but missing from today's meal gets added by the scheduler
+  const mh = env.sheetHeader('05_MENU_ITEMS');
+  env.db.getSheetByName('05_MENU_ITEMS').data.push(mh.map((c) => ({ item_id: '11111111-1111-4111-8111-111111111111', code: 'F099', name: 'สุกี้หมู', default_price: 50, default_stock: 50, max_per_order: 0, status: 'ACTIVE', is_deleted: 'FALSE', sort_order: 9 }[c] ?? '')));
+  env.cache && delete env.cache.menu_master_v1;
+  assert.ok(!names().includes('สุกี้หมู'));
+  env.newExecution();
+  const rep = env.ctx.runScheduler();
+  assert.equal(rep.fillDailyMenus, 1);
+  assert.ok(names().includes('สุกี้หมู'));
+  // A menu the admin removed from the day is NOT re-added by the scheduler
+  const w = ok(env.api('meal.list', {}, a)).rows.find((x) => x.date === '2026-09-25');
+  const dm = ok(env.api('daily.list', { window_id: w.window_id }, a)).rows.find((x) => x.name === 'สุกี้หมู');
+  ok(env.api('daily.remove', { daily_menu_id: dm.daily_menu_id }, a));
+  env.newExecution();
+  assert.equal(env.ctx.runScheduler().fillDailyMenus, 0);
+  assert.ok(!names().includes('สุกี้หมู'));
+});
