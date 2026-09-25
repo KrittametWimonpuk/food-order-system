@@ -40,7 +40,7 @@ var Login = {
     $('#empPin').addEventListener('input', function () { this.value = this.value.replace(/\D/g, ''); });
     $('#loginForm').onsubmit = function (e) { e.preventDefault(); Login.submit(); };
     $('#forgotPin').onclick = function (e) { e.preventDefault(); Login.forgot(); };
-    setTimeout(function () { (lastCode ? $('#empPin') : $('#empCode')).focus(); }, 60);
+    focusSoon(function () { return lastCode ? $('#empPin') : $('#empCode'); }, 60);
     if (!App.state.app) apiCall('app.info').then(function (info) {
       App.state.app = info;
       var c = $('#loginCompany');

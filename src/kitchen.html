@@ -307,7 +307,7 @@ Desk.register('k-pickup', {
       });
     };
     $('#puForm').onsubmit = function (e) { e.preventDefault(); guard($('#puBtn'), lookup); };
-    setTimeout(function () { input.focus(); }, 50);
+    focusSoon(input, 50);
     // Camera scan (BarcodeDetector) — only shown when supported.
     var stream = null, scanning = false;
     var stopCam = function () {

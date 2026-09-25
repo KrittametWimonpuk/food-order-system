@@ -295,11 +295,24 @@ function openModal(opts) {
   });
   document.body.appendChild(bd);
   ModalStack.push(ctl);
-  setTimeout(function () {
-    var f = $('[autofocus]', bd) || $('.modal-body input, .modal-body select, .modal-body textarea', bd) || $('.modal-footer .btn:last-child', bd);
-    if (f) f.focus();
-  }, 30);
+  focusSoon(function () {
+    return $('[autofocus]', bd) || $('.modal-body input, .modal-body select, .modal-body textarea', bd) || $('.modal-footer .btn:last-child', bd);
+  }, 30, bd);
   return ctl;
+}
+/**
+ * Focuses an element shortly after render, but never steals focus: skipped when
+ * the user already moved focus to a field (inside `scope`, or anywhere if none).
+ * @param {Function|HTMLElement} target element or function returning it
+ */
+function focusSoon(target, ms, scope) {
+  setTimeout(function () {
+    var a = document.activeElement;
+    var userFocused = a && a !== document.body && (!scope || scope.contains(a)) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName);
+    if (userFocused) return;
+    var el = typeof target === 'function' ? target() : target;
+    if (el && el.focus && document.body.contains(el)) el.focus();
+  }, ms || 30);
 }
 function trapFocus(root, e) {
   var f = $all('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])', root);
@@ -395,10 +408,9 @@ function uuidv4() {
 function emptyState(title, text, iconName, actionHtml) {
   return '<div class="empty"><div class="empty-icon">' + icon(iconName || 'bowl') + '</div><h3>' + esc(title) + '</h3>' + (text ? '<p>' + esc(text) + '</p>' : '') + (actionHtml ? '<div class="mt-16">' + actionHtml + '</div>' : '') + '</div>';
 }
+/** Centered loading spinner shown while a page/section loads (n kept for compatibility). */
 function skeleton(n) {
-  var s = '<div class="page-loading" aria-busy="true" aria-label="กำลังโหลด">';
-  for (var i = 0; i < (n || 3); i++) s += '<div class="skeleton"></div>';
-  return s + '</div>';
+  return '<div class="page-loading" role="status" aria-busy="true" aria-live="polite"><div class="spinner spinner-lg"></div><span class="muted">กำลังโหลด...</span></div>';
 }
 function errorBlock(err, retryId) {
   return '<div class="empty"><div class="empty-icon" style="background:var(--danger-50);color:var(--danger)">' + icon('alert') + '</div><h3>โหลดข้อมูลไม่สำเร็จ</h3><p>' + esc(err && err.message || '') + '</p>' +
