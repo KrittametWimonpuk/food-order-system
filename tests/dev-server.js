@@ -15,6 +15,7 @@ function startServer(opts = {}) {
   env.ctx.setupDatabase();
   env.ctx.setupFirstAdmin();
   env.ctx.seedSampleData();
+  if (opts.config) env.setConfig(opts.config);
   env.newExecution();
   env.ctx.runScheduler();
   const pins = {};

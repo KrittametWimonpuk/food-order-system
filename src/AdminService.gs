@@ -96,7 +96,7 @@ function validateSetting_(key, type, raw) {
     case 'bool': return toBool(v) ? 'TRUE' : 'FALSE';
     case 'int':
       assert(/^\d{1,6}$/.test(v), 'VALIDATION_ERROR', key + ' ต้องเป็นตัวเลข');
-      if (key === 'MAX_QTY_PER_ORDER') assert(toInt(v) >= 1 && toInt(v) <= 50, 'VALIDATION_ERROR', 'จำนวนสูงสุดต่อ Order ต้องอยู่ระหว่าง 1-50');
+      if (key === 'MAX_QTY_PER_ORDER') assert(toInt(v) >= 0 && toInt(v) <= 100, 'VALIDATION_ERROR', 'จำนวนสูงสุดต่อ Order ต้องอยู่ระหว่าง 0-100 (0 = ไม่จำกัด)');
       if (key === 'SUMMARY_INTERVAL_MINUTES') assert(toInt(v) >= 5, 'VALIDATION_ERROR', 'ช่วงเวลาสรุปต้องไม่น้อยกว่า 5 นาที');
       if (key === 'SESSION_TIMEOUT_MINUTES') assert(toInt(v) >= 5, 'VALIDATION_ERROR', 'Session timeout ต้องไม่น้อยกว่า 5 นาที');
       if (key === 'PIN_MIN_LENGTH') assert(toInt(v) >= 4 && toInt(v) <= 8, 'VALIDATION_ERROR', 'ความยาว PIN ต้องอยู่ระหว่าง 4-8');

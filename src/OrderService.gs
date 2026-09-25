@@ -55,7 +55,7 @@ function priceAndCheckItems_(w, reqItems, released) {
   released = released || {};
   var dmRows = dbFind('DAILY_MENU', 'window_id', w.window_id);
   var dmById = indexBy(dmRows, 'daily_menu_id');
-  var maxPerOrder = Math.max(1, cfgInt('MAX_QTY_PER_ORDER', 3));
+  var maxPerOrder = Math.max(0, cfgInt('MAX_QTY_PER_ORDER', 0)); // 0 = unlimited
   var lines = [], totalQty = 0, totalAmount = 0;
   reqItems.forEach(function (it) {
     var d = dmById[it.daily_menu_id];
@@ -77,7 +77,7 @@ function priceAndCheckItems_(w, reqItems, released) {
     totalQty += it.qty;
     totalAmount = roundMoney(totalAmount + price * it.qty);
   });
-  if (totalQty > maxPerOrder) fail('INVALID_QTY', 'สั่งได้สูงสุด ' + maxPerOrder + ' กล่องต่อ Order');
+  if (maxPerOrder > 0 && totalQty > maxPerOrder) fail('INVALID_QTY', 'สั่งได้สูงสุด ' + maxPerOrder + ' กล่องต่อ Order');
   return { lines: lines, totalQty: totalQty, totalAmount: totalAmount, dmById: dmById };
 }
 

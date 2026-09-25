@@ -118,7 +118,9 @@ var Employee = {
     if (m.max_per_order > 0) avail = Math.min(avail, m.max_per_order);
     return Math.max(0, avail);
   },
-  orderLimit: function () { return (App.state.app && App.state.app.maxQtyPerOrder) || 3; },
+  /** Max boxes per order (0 in settings = unlimited). */
+  orderLimit: function () { var n = App.state.app ? Number(App.state.app.maxQtyPerOrder) : 0; return n > 0 ? n : Infinity; },
+  allowMultiple: function () { return !!(App.state.app && App.state.app.allowMultipleOrders); },
 
   /**
    * Sets qty of an item in the cart (0 removes). Returns false when blocked.
@@ -243,10 +245,9 @@ var Employee = {
     var active = (d.myOrders || []).filter(function (o) { return o.status !== 'CANCELLED'; });
     var html = Employee.headerHtml() + '<div class="m-content">' + Employee.mealCardHtml(w);
     if (d.windows.length > 1) html += Employee.windowTabsHtml();
-    if (active.length) {
-      html += active.map(Employee.activeOrderHtml).join('');
-    } else if (w && w.can_order) {
-      html += '<button class="btn btn-primary btn-lg btn-block" id="goOrder">' + icon('utensils') + '<span>สั่งอาหารเลย</span></button>';
+    if (active.length) html += active.map(Employee.activeOrderHtml).join('');
+    if (w && w.can_order && (!active.length || Employee.allowMultiple())) {
+      html += '<button class="btn btn-primary btn-lg btn-block" id="goOrder">' + icon(active.length ? 'plus' : 'utensils') + '<span>' + (active.length ? 'สั่งอาหารเพิ่ม' : 'สั่งอาหารเลย') + '</span></button>';
     }
     if (w && d.menu.length) {
       html += '<div><div class="section-title"><span>เมนู' + esc(w.meal_th) + '</span><button class="btn btn-ghost btn-sm" id="seeAll"><span>ดูทั้งหมด</span>' + icon('chevronRight', 'icon-sm') + '</button></div>' +
@@ -316,7 +317,9 @@ var Employee = {
     if (Employee.cart && Employee.cart.editOrderId) html += '<div class="alert alert-warning">' + icon('edit') + '<div>กำลังแก้ไข Order เดิม — เลือกเมนูแล้วกด "ดูตะกร้า" เพื่อบันทึก</div></div>';
     var active = (d.myOrders || []).filter(function (o) { return o.status !== 'CANCELLED'; });
     if (active.length && !(Employee.cart && Employee.cart.editOrderId) && w && w.can_order) {
-      html += '<div class="alert alert-info">' + icon('info') + '<div>คุณสั่งอาหารมื้อนี้แล้ว (' + esc(active[0].order_no) + ') หากต้องการเปลี่ยน กรุณากด "แก้ไข" ที่รายการของฉัน</div></div>';
+      html += Employee.allowMultiple()
+        ? '<div class="alert alert-info">' + icon('info') + '<div>คุณสั่งมื้อนี้แล้ว ' + active.length + ' Order — เลือกเมนูเพื่อสั่งเพิ่มได้เลย (ดู/แก้ไขได้ที่ "รายการของฉัน")</div></div>'
+        : '<div class="alert alert-info">' + icon('info') + '<div>คุณสั่งอาหารมื้อนี้แล้ว (' + esc(active[0].order_no) + ') หากต้องการเปลี่ยน กรุณากด "แก้ไข" ที่รายการของฉัน</div></div>';
     }
     if (w && !d.menu.length) html += '<div class="card">' + emptyState('วันนี้ยังไม่มีเมนูอาหาร', 'ยังไม่มีเมนูสำหรับมื้อนี้', 'bowl') + '</div>';
     else if (w) html += '<div class="menu-list">' + d.menu.map(Employee.menuCardHtml).join('') + '</div>';
@@ -565,7 +568,7 @@ var Employee = {
       openModal({ title: 'วิธีใช้งาน', sheet: true, body: '<ol style="padding-left:20px;margin:0;line-height:1.9">' +
         '<li>ไปที่ <b>สั่งอาหาร</b> แล้วกด <b>เลือกเมนู</b></li><li>เลือกจำนวน ใส่หมายเหตุ แล้วกด <b>เพิ่มลงตะกร้า</b></li>' +
         '<li>กด <b>ดูตะกร้า</b> แล้วกด <b>ยืนยันการสั่งอาหาร</b></li><li>แก้ไข/ยกเลิกได้ก่อนเวลาปิดรับจอง' + (app.allowEdit === false ? ' (ปิดการแก้ไขอยู่)' : '') + '</li>' +
-        '<li>แสดง <b>QR / เลข Order</b> ที่จุดรับอาหาร</li><li>สั่งได้สูงสุด ' + esc(app.maxQtyPerOrder || 3) + ' กล่องต่อ Order</li></ol>', actions: [{ text: 'เข้าใจแล้ว', cls: 'btn-primary' }] });
+        '<li>แสดง <b>QR / เลข Order</b> ที่จุดรับอาหาร</li>' + (app.maxQtyPerOrder > 0 ? '<li>สั่งได้สูงสุด ' + esc(app.maxQtyPerOrder) + ' กล่องต่อ Order</li>' : '') + (app.allowMultipleOrders ? '<li>สั่งได้หลาย Order ต่อมื้อ</li>' : '') + '</ol>', actions: [{ text: 'เข้าใจแล้ว', cls: 'btn-primary' }] });
     };
   }
 };

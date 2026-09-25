@@ -46,7 +46,8 @@ async function login(page, url, code, pin) {
 }
 
 (async () => {
-  const { server, pins, port, env } = await startServer({ now: '2026-09-25 09:00' });
+  // E2E exercises the strict limits (1 order per meal, max 3 boxes) to cover those UI rules.
+  const { server, pins, port, env } = await startServer({ now: '2026-09-25 09:00', config: { ALLOW_MULTIPLE_ORDERS: 'FALSE', MAX_QTY_PER_ORDER: '3' } });
   const url = 'http://localhost:' + port + '/';
   const browser = await chromium.launch({ executablePath: fs.existsSync('/opt/pw-browsers/chromium') ? undefined : undefined });
   const errors = [];
@@ -212,6 +213,25 @@ async function login(page, url, code, pin) {
       await shot(a, '12-admin-' + p);
       check('admin page renders: ' + p, !(await a.$('#content .empty h3:text("โหลดข้อมูลไม่สำเร็จ")')));
     }
+    // Meal windows: create a dinner by mistake, edit it, then delete it
+    await a.click('.nav-item[data-page="meals"]');
+    await a.waitForSelector('#mwTable table');
+    await a.click('#mwAdd');
+    await a.selectOption('#f_meal', 'DINNER');
+    await a.click('.modal-footer .btn-primary');
+    await a.waitForSelector('.toast-success');
+    await a.waitForFunction(() => document.querySelectorAll('#mwTable [data-del]').length === 2);
+    check('every meal row has edit + delete buttons', (await a.$$('#mwTable [data-edit]')).length === 2);
+    await a.click('#mwTable tr:has-text("มื้อเย็น") [data-edit]');
+    await a.fill('#f_close', '16:00');
+    await a.click('.modal-footer .btn-primary');
+    await a.waitForFunction(() => document.querySelector('#mwTable').textContent.includes('16:00'));
+    check('meal time edited', true);
+    await a.click('#mwTable tr:has-text("มื้อเย็น") [data-del]');
+    await a.click('.modal-footer .btn-danger');
+    await a.waitForFunction(() => document.querySelectorAll('#mwTable [data-del]').length === 1);
+    check('meal deleted', !(await a.textContent('#mwTable')).includes('มื้อเย็น'));
+    await shot(a, '12b-admin-meals-actions');
     // Add a menu
     await a.click('.nav-item[data-page="menu"]');
     await a.waitForSelector('#mnAdd');
@@ -241,8 +261,8 @@ async function login(page, url, code, pin) {
     await a.waitForSelector('#stSave');
     await a.fill('#f_MAX_QTY_PER_ORDER', '4');
     await a.click('#stSave');
-    await a.waitForSelector('.toast-success');
-    check('settings saved', (await a.textContent('.toast-success')).includes('บันทึก'));
+    await a.waitForSelector('.toast-success:has-text("บันทึกแล้ว")');
+    check('settings saved', true);
     // Collapse sidebar
     await a.click('#sbCollapse');
     await a.waitForTimeout(250);

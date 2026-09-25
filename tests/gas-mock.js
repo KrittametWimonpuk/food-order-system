@@ -339,6 +339,16 @@ function createGasEnv(options = {}) {
       nowMs = local === null ? null : new RealDate(local.replace(' ', 'T') + (local.length === 16 ? ':00' : '') + '+07:00').getTime();
       flowStart = flowing ? RealDate.now() : null;
     },
+    /** Overrides 01_CONFIG values (after setupDatabase) and clears the config cache. */
+    setConfig(values) {
+      const sh = db.getSheetByName('01_CONFIG');
+      Object.keys(values).forEach((k) => {
+        const row = sh.data.find((r, i) => i > 0 && r[0] === k);
+        if (row) row[1] = String(values[k]); else sh.data.push([k, String(values[k]), '', '', '']);
+      });
+      delete cache.cfg_v1;
+      vm.runInContext('CONFIG_MEMO = null;', context);
+    },
     /** Resets per-execution memory (simulates a new Apps Script execution). */
     newExecution() {
       vm.runInContext('DB_STATE.memo = {}; DB_STATE.sheets = {}; DB_STATE.headers = {}; DB_STATE.ss = null; CONFIG_MEMO = null; REQUEST_CTX.user = null;', context);

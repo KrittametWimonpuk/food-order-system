@@ -137,7 +137,7 @@ function getPublicAppInfo() {
     companyName: cfg('COMPANY_NAME') || 'โรงงาน ABC',
     timezone: APP.TIMEZONE,
     serverTime: nowStr(),
-    maxQtyPerOrder: cfgInt('MAX_QTY_PER_ORDER', 3),
+    maxQtyPerOrder: Math.max(0, cfgInt('MAX_QTY_PER_ORDER', 0)), // 0 = unlimited
     allowEdit: cfgBool('ALLOW_EDIT'),
     allowCancel: cfgBool('ALLOW_CANCEL'),
     allowMultipleOrders: cfgBool('ALLOW_MULTIPLE_ORDERS'),

@@ -401,7 +401,7 @@ Desk.register('k-settings', {
       '<div class="row row-wrap mt-16"><button class="btn btn-primary" id="ksPin">' + icon('key') + '<span>เปลี่ยน PIN</span></button><button class="btn btn-outline" id="ksOrder">' + icon('cart') + '<span>สั่งอาหารของฉัน</span></button><button class="btn btn-outline-danger" id="ksLogout">' + icon('logout') + '<span>ออกจากระบบ</span></button></div></div>' +
       '<div class="card card-body"><div class="card-title mb-12">' + icon('info') + 'ข้อมูลระบบ</div><div class="detail-list">' +
       '<div class="summary-row"><span class="muted">บริษัท</span><b>' + esc(app.companyName) + '</b></div>' +
-      '<div class="summary-row"><span class="muted">จำนวนสูงสุดต่อ Order</span><b>' + esc(app.maxQtyPerOrder) + ' กล่อง</b></div>' +
+      '<div class="summary-row"><span class="muted">จำนวนสูงสุดต่อ Order</span><b>' + (app.maxQtyPerOrder > 0 ? esc(app.maxQtyPerOrder) + ' กล่อง' : 'ไม่จำกัด') + '</b></div>' +
       '<div class="summary-row"><span class="muted">อนุญาตแก้ไข / ยกเลิก</span><b>' + (app.allowEdit ? 'ได้' : 'ไม่ได้') + ' / ' + (app.allowCancel ? 'ได้' : 'ไม่ได้') + '</b></div>' +
       '<div class="summary-row"><span class="muted">Timezone</span><b>' + esc(app.timezone) + '</b></div>' +
       '<div class="summary-row"><span class="muted">เวอร์ชัน</span><b>' + esc(app.version) + '</b></div></div>' +

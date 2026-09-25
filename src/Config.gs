@@ -252,10 +252,10 @@ var SCHEMA = {
 var DEFAULT_CONFIG = [
   ['COMPANY_NAME', 'โรงงาน ABC', 'ชื่อบริษัท/โรงงาน ที่แสดงในระบบ'],
   ['TIMEZONE', 'Asia/Bangkok', 'Timezone ของระบบ (อ่านอย่างเดียว)'],
-  ['MAX_QTY_PER_ORDER', '3', 'จำนวนกล่องสูงสุดต่อ 1 Order'],
+  ['MAX_QTY_PER_ORDER', '0', 'จำนวนกล่องสูงสุดต่อ 1 Order (0 = ไม่จำกัด)'],
   ['ALLOW_EDIT', 'TRUE', 'อนุญาตให้พนักงานแก้ไข Order ก่อนปิดรอบ'],
   ['ALLOW_CANCEL', 'TRUE', 'อนุญาตให้พนักงานยกเลิก Order ก่อนปิดรอบ'],
-  ['ALLOW_MULTIPLE_ORDERS', 'FALSE', 'อนุญาตให้พนักงาน 1 คนสั่งได้หลาย Order ต่อมื้อ'],
+  ['ALLOW_MULTIPLE_ORDERS', 'TRUE', 'อนุญาตให้พนักงาน 1 คนสั่งได้หลาย Order ต่อมื้อ'],
   ['DEFAULT_MEALS', 'LUNCH', 'มื้อที่สร้างอัตโนมัติทุกวัน (คั่นด้วย , เช่น LUNCH,DINNER)'],
   ['AUTO_CREATE_WINDOW', 'TRUE', 'สร้างมื้ออาหารของวันอัตโนมัติ'],
   ['AUTO_DAILY_MENU', 'TRUE', 'ใส่เมนูที่เปิดใช้งานทั้งหมดเข้า Daily Menu อัตโนมัติเมื่อสร้างมื้อ'],

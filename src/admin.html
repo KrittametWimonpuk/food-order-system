@@ -254,11 +254,21 @@ Desk.register('meals', {
               '<td>' + esc(formatTime(w.open_at, true)) + '</td><td>' + esc(formatTime(w.close_at, true)) + '</td><td class="nowrap">' + esc(formatTime(w.pickup_start, true)) + '–' + esc(formatTime(w.pickup_end, true)) + '</td>' +
               '<td class="num">' + w.menu_count + '</td><td class="num">' + w.sold_qty + '/' + w.stock_total + '</td><td>' + (w.auto ? '<span class="badge badge-success">อัตโนมัติ</span>' : '<span class="badge">กำหนดเอง</span>') + '</td><td>' + renderStatus(w.status) + '</td>' +
               '<td class="actions"><button class="btn btn-outline btn-sm" data-status="' + esc(w.window_id) + '">สถานะ</button><button class="btn btn-outline btn-sm btn-icon" data-menu="' + esc(w.window_id) + '" data-date="' + esc(w.date) + '" aria-label="เมนูของมื้อนี้">' + icon('bowl', 'icon-sm') + '</button>' +
-              (w.status !== 'COMPLETED' ? '<button class="btn btn-outline btn-sm btn-icon" data-edit="' + esc(w.window_id) + '" aria-label="แก้ไขมื้อ">' + icon('edit', 'icon-sm') + '</button>' : '') + '</td></tr>';
+              '<button class="btn btn-outline btn-sm btn-icon" data-edit="' + esc(w.window_id) + '" aria-label="แก้ไขมื้อ" title="แก้ไขวัน/เวลา">' + icon('edit', 'icon-sm') + '</button>' +
+              '<button class="btn btn-outline-danger btn-sm btn-icon" data-del="' + esc(w.window_id) + '" aria-label="ลบมื้อ" title="ลบมื้อ">' + icon('trash', 'icon-sm') + '</button></td></tr>';
           }).join('') + '</tbody></table></div>';
         $all('[data-edit]', box).forEach(function (b) { b.onclick = function () { editWindow(d.rows.filter(function (x) { return x.window_id === b.dataset.edit; })[0]); }; });
         $all('[data-menu]', box).forEach(function (b) { b.onclick = function () { Desk.go('daily', { window_id: b.dataset.menu, date: b.dataset.date }); }; });
         $all('[data-status]', box).forEach(function (b) { b.onclick = function () { statusDialog(d.rows.filter(function (x) { return x.window_id === b.dataset.status; })[0]); }; });
+        $all('[data-del]', box).forEach(function (b) {
+          var w = d.rows.filter(function (x) { return x.window_id === b.dataset.del; })[0];
+          b.onclick = function () {
+            confirmModal('ลบ' + w.meal_th + ' วันที่ ' + formatDate(w.date, true) + ' ?', { title: 'ลบมื้ออาหาร', danger: true, okText: 'ลบมื้อ',
+              detail: 'ลบได้เฉพาะมื้อที่ยังไม่มี Order (หรือ Order ถูกยกเลิกทั้งหมด) — หลังลบสามารถกด "สร้างมื้ออาหาร" ใหม่ได้ และระบบจะไม่สร้างมื้อนี้ซ้ำอัตโนมัติ' }).then(function (ok) {
+              if (ok) guard(b, function () { return apiCall('meal.delete', { window_id: w.window_id }).then(function () { showToast('ลบมื้ออาหารแล้ว', 'success'); return load(); }); });
+            });
+          };
+        });
       }).catch(function (e) { if (!e.handled) $('#mwTable').innerHTML = errorBlock(e); });
     };
     var statusDialog = function (w) {
@@ -295,7 +305,8 @@ Desk.register('meals', {
         formField({ name: 'pickup_start', label: 'เริ่มรับอาหาร', type: 'time', value: t.pickupStart, required: true }) +
         formField({ name: 'pickup_end', label: 'สิ้นสุดรับอาหาร', type: 'time', value: t.pickupEnd, required: true }) +
         formField({ name: 'note', label: 'หมายเหตุ (แสดงให้พนักงานเห็น)', value: isNew ? '' : w.note, max: 200, span2: true }) +
-        formField({ name: 'auto', label: 'โหมด', type: 'switch', value: isNew ? true : w.auto, switchLabel: 'เปิด/ปิดอัตโนมัติตามเวลา', span2: true }) +
+        formField({ name: 'auto', label: 'โหมด', type: 'switch', value: isNew ? true : w.auto, switchLabel: 'เปิด/ปิดอัตโนมัติตามเวลา', span2: true,
+          hint: isNew ? '' : 'แก้เวลาแล้ว สถานะจะคำนวณใหม่ตามเวลา (แนะนำให้เปิดโหมดอัตโนมัติ) — มื้อที่จบแล้วจะกลับมาเปิดรับได้ถ้าเวลาปิดรับยังไม่ถึง' }) +
         (isNew ? formField({ name: 'copy_menu', label: 'เมนู', type: 'switch', value: true, switchLabel: 'ใส่เมนูที่เปิดใช้งานทั้งหมดอัตโนมัติ', span2: true }) : '') + '</form>');
       if (isNew) $('#f_meal', body).onchange = function () { var x = def(this.value); $('#f_open', body).value = x.open; $('#f_close', body).value = x.close; $('#f_pickup_start', body).value = x.pickupStart; $('#f_pickup_end', body).value = x.pickupEnd; };
       openModal({ title: isNew ? 'สร้างมื้ออาหาร' : 'แก้ไขมื้ออาหาร', size: 'lg', body: body, actions: [{ text: 'ยกเลิก' }, { text: 'บันทึก', cls: 'btn-primary', icon: 'check', onClick: function (m) {
@@ -587,7 +598,7 @@ Desk.register('settings', {
       { title: 'ความปลอดภัย', icon: 'lock', keys: ['SESSION_TIMEOUT_MINUTES', 'REMEMBER_DAYS', 'LOGIN_MAX_ATTEMPTS', 'LOGIN_LOCK_MINUTES', 'PIN_MIN_LENGTH'] },
       { title: 'Scheduler และ Backup', icon: 'database', keys: ['SCHEDULER_INTERVAL_MINUTES', 'BACKUP_ENABLED', 'BACKUP_HOUR', 'BACKUP_RETENTION_DAYS'] }
     ];
-    var labels = { COMPANY_NAME: 'ชื่อบริษัท', DEPARTMENTS: 'แผนก', MENU_CATEGORIES: 'หมวดหมู่เมนู', PAYMENT_METHOD: 'วิธีชำระเงิน', MAX_QTY_PER_ORDER: 'Max Qty ต่อ Order', ALLOW_EDIT: 'อนุญาตแก้ไข Order', ALLOW_CANCEL: 'อนุญาตยกเลิก Order', ALLOW_MULTIPLE_ORDERS: 'สั่งได้หลาย Order ต่อมื้อ', AUTO_NO_SHOW: 'ไม่มารับอัตโนมัติ (NO_SHOW)', AUTO_CREATE_WINDOW: 'สร้างมื้ออัตโนมัติทุกวัน', AUTO_DAILY_MENU: 'ใส่เมนูอัตโนมัติ', DEFAULT_MEALS: 'มื้อที่สร้างอัตโนมัติ', WORKING_DAYS: 'วันทำงาน', LUNCH_OPEN_TIME: 'กลางวัน: Default Open Time', LUNCH_CLOSE_TIME: 'กลางวัน: Default Close Time', LUNCH_PICKUP_START: 'กลางวัน: Pickup Start', LUNCH_PICKUP_END: 'กลางวัน: Pickup End', BREAKFAST_OPEN_TIME: 'เช้า: เปิดรับ', BREAKFAST_CLOSE_TIME: 'เช้า: ปิดรับ', BREAKFAST_PICKUP_START: 'เช้า: เริ่มรับอาหาร', BREAKFAST_PICKUP_END: 'เช้า: สิ้นสุดรับอาหาร', DINNER_OPEN_TIME: 'เย็น: เปิดรับ', DINNER_CLOSE_TIME: 'เย็น: ปิดรับ', DINNER_PICKUP_START: 'เย็น: เริ่มรับอาหาร', DINNER_PICKUP_END: 'เย็น: สิ้นสุดรับอาหาร', LINE_ENABLED: 'เปิดการส่ง LINE', LINE_NOTIFICATION_MODE: 'LINE Notification Mode', SUMMARY_INTERVAL_MINUTES: 'Summary Interval (นาที)', LINE_WEBHOOK_CAPTURE: 'บันทึก Group ID จาก Webhook', SESSION_TIMEOUT_MINUTES: 'Session Timeout (นาที)', REMEMBER_DAYS: 'จำการเข้าสู่ระบบ (วัน)', LOGIN_MAX_ATTEMPTS: 'ใส่ PIN ผิดได้ (ครั้ง)', LOGIN_LOCK_MINUTES: 'ล็อกบัญชี (นาที)', PIN_MIN_LENGTH: 'ความยาว PIN ขั้นต่ำ', SCHEDULER_INTERVAL_MINUTES: 'Scheduler ทุก (นาที)', BACKUP_ENABLED: 'Backup Enabled', BACKUP_HOUR: 'เวลา Backup (ชั่วโมง)', BACKUP_RETENTION_DAYS: 'เก็บ Backup (วัน, 0=ทั้งหมด)' };
+    var labels = { COMPANY_NAME: 'ชื่อบริษัท', DEPARTMENTS: 'แผนก', MENU_CATEGORIES: 'หมวดหมู่เมนู', PAYMENT_METHOD: 'วิธีชำระเงิน', MAX_QTY_PER_ORDER: 'Max Qty ต่อ Order (0 = ไม่จำกัด)', ALLOW_EDIT: 'อนุญาตแก้ไข Order', ALLOW_CANCEL: 'อนุญาตยกเลิก Order', ALLOW_MULTIPLE_ORDERS: 'สั่งได้หลาย Order ต่อมื้อ', AUTO_NO_SHOW: 'ไม่มารับอัตโนมัติ (NO_SHOW)', AUTO_CREATE_WINDOW: 'สร้างมื้ออัตโนมัติทุกวัน', AUTO_DAILY_MENU: 'ใส่เมนูอัตโนมัติ', DEFAULT_MEALS: 'มื้อที่สร้างอัตโนมัติ', WORKING_DAYS: 'วันทำงาน', LUNCH_OPEN_TIME: 'กลางวัน: Default Open Time', LUNCH_CLOSE_TIME: 'กลางวัน: Default Close Time', LUNCH_PICKUP_START: 'กลางวัน: Pickup Start', LUNCH_PICKUP_END: 'กลางวัน: Pickup End', BREAKFAST_OPEN_TIME: 'เช้า: เปิดรับ', BREAKFAST_CLOSE_TIME: 'เช้า: ปิดรับ', BREAKFAST_PICKUP_START: 'เช้า: เริ่มรับอาหาร', BREAKFAST_PICKUP_END: 'เช้า: สิ้นสุดรับอาหาร', DINNER_OPEN_TIME: 'เย็น: เปิดรับ', DINNER_CLOSE_TIME: 'เย็น: ปิดรับ', DINNER_PICKUP_START: 'เย็น: เริ่มรับอาหาร', DINNER_PICKUP_END: 'เย็น: สิ้นสุดรับอาหาร', LINE_ENABLED: 'เปิดการส่ง LINE', LINE_NOTIFICATION_MODE: 'LINE Notification Mode', SUMMARY_INTERVAL_MINUTES: 'Summary Interval (นาที)', LINE_WEBHOOK_CAPTURE: 'บันทึก Group ID จาก Webhook', SESSION_TIMEOUT_MINUTES: 'Session Timeout (นาที)', REMEMBER_DAYS: 'จำการเข้าสู่ระบบ (วัน)', LOGIN_MAX_ATTEMPTS: 'ใส่ PIN ผิดได้ (ครั้ง)', LOGIN_LOCK_MINUTES: 'ล็อกบัญชี (นาที)', PIN_MIN_LENGTH: 'ความยาว PIN ขั้นต่ำ', SCHEDULER_INTERVAL_MINUTES: 'Scheduler ทุก (นาที)', BACKUP_ENABLED: 'Backup Enabled', BACKUP_HOUR: 'เวลา Backup (ชั่วโมง)', BACKUP_RETENTION_DAYS: 'เก็บ Backup (วัน, 0=ทั้งหมด)' };
     var load = function () {
       return apiCall('settings.get').then(function (d) {
         if (Desk.current !== 'settings') return;

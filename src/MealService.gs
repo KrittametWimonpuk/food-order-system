@@ -16,6 +16,7 @@
  * @return {string}
  */
 function computeWindowStatus(w, now) {
+  if (w.status === WINDOW_DELETED) return WINDOW_DELETED;
   if (w.status === WINDOW_STATUS.COMPLETED) return WINDOW_STATUS.COMPLETED;
   if (!toBool(w.auto)) {
     if (w.status === WINDOW_STATUS.OPEN && now >= w.close_at) return WINDOW_STATUS.CLOSED;
@@ -38,7 +39,7 @@ function isWindowOrderable(w, now) {
 
 /** Throws the proper error when the window is not orderable. */
 function assertWindowOrderable(w, now) {
-  assert(w, 'MEAL_NOT_FOUND');
+  assert(w && w.status !== WINDOW_DELETED, 'MEAL_NOT_FOUND');
   if (isWindowOrderable(w, now)) return;
   var st = computeWindowStatus(w, now);
   if (st === WINDOW_STATUS.DRAFT) fail('MEAL_NOT_OPEN', ERR.MEAL_NOT_OPEN + ' (เปิด ' + hhmm(w.open_at) + ' น.)');
@@ -78,9 +79,18 @@ function getWindowById(windowId) {
   return w;
 }
 
-/** Windows for a date sorted by meal order. */
-function getWindowsByDate(dateStr) {
-  return dbFind('MEAL_WINDOWS', 'date', dateStr).sort(function (a, b) {
+/** Soft-deleted window status (kept in the sheet, hidden everywhere). */
+var WINDOW_DELETED = 'DELETED';
+
+/**
+ * Windows for a date sorted by meal order.
+ * @param {string} dateStr
+ * @param {boolean=} includeDeleted also return soft-deleted windows
+ */
+function getWindowsByDate(dateStr, includeDeleted) {
+  return dbFind('MEAL_WINDOWS', 'date', dateStr).filter(function (w) {
+    return includeDeleted || w.status !== WINDOW_DELETED;
+  }).sort(function (a, b) {
     return MEAL_TYPES.indexOf(a.meal) - MEAL_TYPES.indexOf(b.meal);
   });
 }
@@ -178,11 +188,12 @@ function ensureWindowsForDate(dateStr) {
   var meals = cfgList('DEFAULT_MEALS').map(function (m) { return m.toUpperCase(); })
     .filter(function (m) { return MEAL_TYPES.indexOf(m) >= 0; });
   if (!meals.length) return 0;
-  var existing = getWindowsByDate(dateStr).map(function (w) { return w.meal; });
+  // Soft-deleted windows count as existing so the scheduler never recreates them.
+  var existing = getWindowsByDate(dateStr, true).map(function (w) { return w.meal; });
   var missing = meals.filter(function (m) { return existing.indexOf(m) < 0; });
   if (!missing.length) return 0;
   return withLock(function () {
-    var ex2 = getWindowsByDate(dateStr).map(function (w) { return w.meal; });
+    var ex2 = getWindowsByDate(dateStr, true).map(function (w) { return w.meal; });
     var created = 0;
     meals.forEach(function (m) {
       if (ex2.indexOf(m) >= 0) return;
@@ -207,7 +218,7 @@ function listWindows(user, p) {
   var to = p.to ? validateDateStr(p.to) : addDays(today, 14);
   var now = nowStr();
   var dmCount = {};
-  var windows = dbAll('MEAL_WINDOWS').filter(function (w) { return w.date >= from && w.date <= to; });
+  var windows = dbAll('MEAL_WINDOWS').filter(function (w) { return w.date >= from && w.date <= to && w.status !== WINDOW_DELETED; });
   if (windows.length) {
     var ids = {};
     windows.forEach(function (w) { ids[w.window_id] = true; });
@@ -246,7 +257,7 @@ function saveWindow(user, p) {
     assert(!dup.length, 'VALIDATION_ERROR', 'มี' + MEAL_LABEL_TH[meal] + 'ของวันที่นี้อยู่แล้ว');
     if (p.window_id) {
       var w = getWindowById(p.window_id);
-      assert(w.status !== WINDOW_STATUS.COMPLETED, 'VALIDATION_ERROR', 'มื้อนี้จบแล้ว ไม่สามารถแก้ไขได้');
+      assert(w.status !== WINDOW_DELETED, 'MEAL_NOT_FOUND');
       if (w.date !== date || w.meal !== meal) {
         var orders = dbFind('ORDERS', 'window_id', w.window_id);
         assert(!orders.length, 'VALIDATION_ERROR', 'มี Order แล้ว ไม่สามารถเปลี่ยนวันที่/มื้อได้');
@@ -256,7 +267,14 @@ function saveWindow(user, p) {
         pickup_start: times.pickup_start, pickup_end: times.pickup_end,
         note: sanitizeText(p.note, 200), auto: toBool(p.auto) ? 'TRUE' : 'FALSE', updated_at: now
       };
-      var d = diffFields(w, changes, ['date', 'meal', 'open_at', 'close_at', 'pickup_start', 'pickup_end', 'note', 'auto']);
+      var timesChanged = ['date', 'open_at', 'close_at', 'pickup_start', 'pickup_end'].some(function (k) { return String(w[k]) !== String(changes[k]); });
+      if (timesChanged || (changes.auto === 'TRUE' && w.auto !== 'TRUE')) {
+        // Re-derive the status from the new times: auto mode moves forward from DRAFT
+        // to wherever the clock is; a manual window re-opens only if its cutoff is ahead.
+        if (changes.auto === 'TRUE' || (times.close_at > now && w.status !== WINDOW_STATUS.OPEN)) changes.status = WINDOW_STATUS.DRAFT;
+        if (times.close_at > now) { changes.final_sent_at = ''; changes.last_summary_at = ''; }
+      }
+      var d = diffFields(w, changes, ['date', 'meal', 'open_at', 'close_at', 'pickup_start', 'pickup_end', 'note', 'auto', 'status']);
       dbUpdate('MEAL_WINDOWS', w, changes);
       if (w.date !== date || w.meal !== meal) {
         var dms = dbFind('DAILY_MENU', 'window_id', w.window_id);
@@ -283,6 +301,7 @@ function setWindowStatus(user, p) {
   assert(WINDOW_STATUSES.indexOf(status) >= 0, 'VALIDATION_ERROR', 'สถานะไม่ถูกต้อง');
   var result = withLock(function () {
     var w = getWindowById(p.window_id);
+    assert(w.status !== WINDOW_DELETED, 'MEAL_NOT_FOUND');
     var now = nowStr();
     var old = computeWindowStatus(w, now);
     if (status === WINDOW_STATUS.OPEN) {
@@ -297,12 +316,33 @@ function setWindowStatus(user, p) {
 }
 
 /**
+ * Soft-deletes a meal window (e.g. created by mistake). Refused while it has
+ * active (non-cancelled) orders. The row stays in the sheet with status DELETED,
+ * the scheduler will not recreate it, and the same date/meal can be created again.
+ * @param {{window_id:string}} p
+ */
+function deleteWindow(user, p) {
+  return withLock(function () {
+    var w = getWindowById(p && p.window_id);
+    assert(w.status !== WINDOW_DELETED, 'MEAL_NOT_FOUND');
+    var active = dbFind('ORDERS', 'window_id', w.window_id).filter(function (o) { return o.status !== ORDER_STATUS.CANCELLED; });
+    assert(!active.length, 'VALIDATION_ERROR', 'มื้อนี้มี Order อยู่ ' + active.length + ' รายการ ลบไม่ได้ — ใช้ "แก้ไข" เพื่อเปลี่ยนเวลา หรือยกเลิก Order ก่อน');
+    var old = w.status;
+    dbUpdate('MEAL_WINDOWS', w, { status: WINDOW_DELETED, auto: 'FALSE', updated_at: nowStr() });
+    writeAudit(user, 'DELETE_MEAL_WINDOW', 'MEAL', w.window_id, { date: w.date, meal: w.meal, status: old }, WINDOW_DELETED);
+    return { deleted: true };
+  });
+}
+
+/**
  * Sets auto mode back on for a window (status then follows the clock).
  */
 function setWindowAuto(user, p) {
   return withLock(function () {
     var w = getWindowById(p && p.window_id);
-    dbUpdate('MEAL_WINDOWS', w, { auto: 'TRUE', updated_at: nowStr() });
+    assert(w.status !== WINDOW_DELETED, 'MEAL_NOT_FOUND');
+    // Restart from DRAFT: auto status only moves forward, so it catches up to the clock.
+    dbUpdate('MEAL_WINDOWS', w, { auto: 'TRUE', status: WINDOW_STATUS.DRAFT, updated_at: nowStr() });
     writeAudit(user, 'SET_MEAL_AUTO', 'MEAL', w.window_id, 'FALSE', 'TRUE');
     return { window: windowToClient(w) };
   });
@@ -318,7 +358,7 @@ function syncWindowStatuses() {
   var today = todayStr();
   var from = addDays(today, -2);
   var candidates = dbAll('MEAL_WINDOWS').filter(function (w) {
-    return w.date >= from && w.date <= today && w.status !== WINDOW_STATUS.COMPLETED;
+    return w.date >= from && w.date <= today && w.status !== WINDOW_STATUS.COMPLETED && w.status !== WINDOW_DELETED;
   });
   var changed = [];
   candidates.forEach(function (w) {

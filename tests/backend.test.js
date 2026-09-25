@@ -9,12 +9,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createGasEnv } = require('./gas-mock');
 
-function setup() {
+function setup(config) {
   const env = createGasEnv({ quiet: true, props: { INIT_ADMIN_ID: 'ADMIN01', INIT_ADMIN_NAME: 'ผู้ดูแลระบบ', INIT_ADMIN_PIN: '482913' } });
   env.setNow('2026-09-25 07:00');
   env.ctx.setupDatabase();
   env.ctx.setupFirstAdmin();
   env.ctx.seedSampleData();
+  if (config) env.setConfig(config);
   const pins = {};
   env.logs.join('\n').split('\n').forEach((l) => {
     const m = l.match(/^(\S+) \((\w+)\) PIN: (\d+)$/);
@@ -123,7 +124,8 @@ test('first admin must change PIN; session expiry and logout', () => {
 });
 
 test('ordering rules: before open, normal, multi-item, double submit, existing order, cutoff', () => {
-  const { env, pins } = setup();
+  // Strict mode: one order per meal, max 3 boxes (the defaults are now unlimited).
+  const { env, pins } = setup({ ALLOW_MULTIPLE_ORDERS: 'FALSE', MAX_QTY_PER_ORDER: '3' });
   const t = login(env, 'EMP00125', pins.EMP00125);
   const home = ok(env.api('employee.home', {}, t));
   assert.equal(home.window.meal, 'LUNCH');
@@ -463,4 +465,62 @@ test('input sanitisation: formula injection and payload validation', () => {
   const a = loginAdmin(env);
   const csv = ok(env.api('report.export', { type: 'orders' }, a)).csv;
   assert.match(csv, /"'=HYPERLINK\(""http:\/\/x""\)script"/);
+});
+
+test('defaults: multiple orders per meal and unlimited boxes per order', () => {
+  const { env, pins } = setup();
+  env.setNow('2026-09-25 08:30');
+  const t = login(env, 'EMP00125', pins.EMP00125);
+  const home = ok(env.api('employee.home', {}, t));
+  assert.equal(home.app.allowMultipleOrders, true);
+  assert.equal(home.app.maxQtyPerOrder, 0);
+  const [m1, m2, m3] = home.menu;
+  const o1 = ok(env.api('order.create', { window_id: home.window.window_id, items: [{ daily_menu_id: m1.daily_menu_id, qty: 5 }, { daily_menu_id: m2.daily_menu_id, qty: 4 }], request_token: reqToken() }, t)).order;
+  assert.equal(o1.total_qty, 9);
+  const o2 = ok(env.api('order.create', { window_id: home.window.window_id, items: [{ daily_menu_id: m3.daily_menu_id, qty: 2 }], request_token: reqToken() }, t)).order;
+  assert.notEqual(o1.order_id, o2.order_id);
+  assert.equal(ok(env.api('order.mine', { tab: 'today' }, t)).rows.length, 2);
+  // stock is still enforced
+  err(env.api('order.create', { window_id: home.window.window_id, items: [{ daily_menu_id: m1.daily_menu_id, qty: 99 }], request_token: reqToken() }, t), 'MENU_SOLD_OUT');
+  // 0 is accepted in settings, >100 is not
+  const a = loginAdmin(env);
+  ok(env.api('settings.save', { values: { MAX_QTY_PER_ORDER: '0' } }, a));
+  err(env.api('settings.save', { values: { MAX_QTY_PER_ORDER: '101' } }, a), 'VALIDATION_ERROR');
+});
+
+test('meal windows: edit a completed window re-opens it; soft delete + recreate', () => {
+  const { env, pins } = setup();
+  const a = loginAdmin(env);
+  const w0 = ok(env.api('meal.list', {}, a)).rows.find((r) => r.date === '2026-09-25' && r.meal === 'LUNCH');
+  // Create a dinner by mistake, end it manually
+  const dinner = ok(env.api('meal.save', { date: '2026-09-25', meal: 'DINNER', open: '06:00', close: '06:30', pickup_start: '06:40', pickup_end: '06:50', auto: true }, a)).window;
+  env.setNow('2026-09-25 07:10');
+  const a2 = loginAdmin(env);
+  ok(env.api('meal.setStatus', { window_id: dinner.window_id, status: 'COMPLETED' }, a2));
+  // Edit its times into the future -> status recomputed, orderable again once open
+  const ed = ok(env.api('meal.save', { window_id: dinner.window_id, date: '2026-09-25', meal: 'DINNER', open: '07:00', close: '15:30', pickup_start: '17:00', pickup_end: '19:00', auto: true }, a2)).window;
+  assert.equal(ed.status, 'OPEN');
+  assert.equal(ed.can_order, true);
+  // Delete: allowed with no orders; hidden from lists; not auto-recreated; can be recreated manually
+  ok(env.api('meal.delete', { window_id: w0.window_id }, a2));
+  env.newExecution();
+  env.ctx.runScheduler();
+  const rows = ok(env.api('meal.list', {}, a2)).rows.filter((r) => r.date === '2026-09-25');
+  assert.equal(rows.some((r) => r.meal === 'LUNCH'), false, 'deleted lunch not shown and not recreated');
+  const again = ok(env.api('meal.save', { date: '2026-09-25', meal: 'LUNCH', open: '07:00', close: '10:30', pickup_start: '11:30', pickup_end: '13:00', auto: true }, a2)).window;
+  assert.notEqual(again.window_id, w0.window_id);
+  err(env.api('meal.delete', { window_id: w0.window_id }, a2), 'MEAL_NOT_FOUND');
+  // Delete is refused while active orders exist, allowed after they are cancelled
+  const t = login(env, 'EMP00125', pins.EMP00125);
+  const home = ok(env.api('employee.home', { window_id: again.window_id }, t));
+  const o = ok(env.api('order.create', { window_id: again.window_id, items: [{ daily_menu_id: home.menu[0].daily_menu_id, qty: 1 }], request_token: reqToken() }, t)).order;
+  err(env.api('meal.delete', { window_id: again.window_id }, a2), 'VALIDATION_ERROR');
+  ok(env.api('order.cancel', { order_id: o.order_id }, t));
+  ok(env.api('meal.delete', { window_id: again.window_id }, a2));
+  err(env.api('order.create', { window_id: again.window_id, items: [{ daily_menu_id: home.menu[0].daily_menu_id, qty: 1 }], request_token: reqToken() }, t), 'MEAL_NOT_FOUND');
+  // Only admins can delete
+  err(env.api('meal.delete', { window_id: dinner.window_id }, t), 'ACCESS_DENIED');
+  // Soft delete: row still in the sheet
+  const hdr = env.sheetHeader('04_MEAL_WINDOWS');
+  assert.ok(env.sheetRows('04_MEAL_WINDOWS').some((r) => r[hdr.indexOf('window_id')] === w0.window_id && r[hdr.indexOf('status')] === 'DELETED'));
 });

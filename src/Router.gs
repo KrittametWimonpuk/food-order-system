@@ -78,6 +78,7 @@ function getRoutes_() {
     'meal.save': { roles: R_A, fn: saveWindow },
     'meal.setStatus': { roles: R_A, fn: setWindowStatus },
     'meal.setAuto': { roles: R_A, fn: setWindowAuto },
+    'meal.delete': { roles: R_A, fn: deleteWindow },
     // Employees
     'emp.list': { roles: R_A, fn: listEmployees },
     'emp.save': { roles: R_A, fn: saveEmployee },
