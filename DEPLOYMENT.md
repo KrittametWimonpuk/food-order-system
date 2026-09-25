@@ -60,6 +60,14 @@ Project Settings → **Script Properties → Add script property**
 
 > ถ้าใช้ **standalone script** (ไม่ได้สร้างจากเมนู Extensions) ให้ตั้ง `DATABASE_SHEET_ID` = ID ใน URL ของ Google Sheet เอง
 
+## 4.5 ตรวจการติดตั้ง `checkInstallation()`
+
+Run `checkInstallation()` (อยู่ใน `Main.gs` หรือ `Code.gs`) → Execution log ต้องขึ้น ✅ ทุกไฟล์ และ `🎉 ติดตั้งครบถูกต้อง`
+ถ้ามี ❌ ให้วางเนื้อหาของไฟล์นั้นใหม่ แล้วรันซ้ำ
+
+> ⚠️ อย่าเปิดโปรเจกต์ Apps Script ไว้หลายแท็บพร้อมกัน — แท็บเก่าจะ auto-save ทับเนื้อหาใหม่ ทำให้ไฟล์ดู "สลับกัน"
+> และหลัง `clasp push` ให้ปิด/รีเฟรชแท็บ editor ก่อนแก้ไขทุกครั้ง
+
 ## 5. Run `setupDatabase()`
 
 ใน Editor เลือกไฟล์ `Main.gs` → dropdown ฟังก์ชันเลือก `setupDatabase` → **Run**

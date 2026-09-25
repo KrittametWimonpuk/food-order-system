@@ -5025,3 +5025,41 @@ function onOpen() {
       .addToUi();
   } catch (e) { /* not bound / no UI */ }
 }
+
+/**
+ * Verifies the project was pasted correctly: every .gs file's key functions
+ * exist and every .html file loads. Run from the editor and read the log.
+ * Helps detect files pasted into the wrong tab or overwritten by a stale tab.
+ */
+function checkInstallation() {
+  var expected = {
+    'Config.gs': ['getConfigMap', 'cfg'], 'Utils.gs': ['nowStr', 'parseLocal'], 'Database.gs': ['dbAll', 'dbInsert', 'withLock'],
+    'Security.gs': ['hashPin', 'verifyPin'], 'Session.gs': ['createSession', 'validateSession'], 'Auth.gs': ['authLogin', 'getPublicAppInfo'],
+    'AuditService.gs': ['writeAudit', 'logError'], 'Validation.gs': ['validatePayload'], 'EmployeeService.gs': ['generatePin', 'getEmployeeHome'],
+    'MealService.gs': ['computeWindowStatus', 'ensureWindowsForDate'], 'MenuService.gs': ['listMenuItems', 'getDailyMenuRows'],
+    'OrderService.gs': ['createOrder', 'pickupOrder'], 'KitchenService.gs': ['getKitchenDashboard', 'lookupPickup'],
+    'ReportService.gs': ['getReport', 'upsertDailySummary'], 'LineService.gs': ['sendLineMessage', 'buildFinalSummaryText'],
+    'NotificationService.gs': ['enqueueNotification', 'processNotificationQueue'], 'BackupService.gs': ['runBackup', 'listBackups'],
+    'TriggerService.gs': ['setupTriggers', 'runScheduler'], 'AdminService.gs': ['getAdminDashboard', 'saveSettings'],
+    'Router.gs': ['api'], 'Main.gs': ['doGet', 'setupDatabase', 'setupFirstAdmin']
+  };
+  var scope = typeof globalThis !== 'undefined' ? globalThis : this;
+  var lines = [], problems = 0;
+  Object.keys(expected).forEach(function (file) {
+    var missing = expected[file].filter(function (fn) { return typeof scope[fn] !== 'function'; });
+    if (missing.length) { problems++; lines.push('❌ ' + file + ' ไม่ถูกต้อง/ไม่มี (ขาด: ' + missing.join(', ') + ')'); }
+    else lines.push('✅ ' + file);
+  });
+  ['index', 'styles', 'components', 'scripts', 'login', 'employee', 'kitchen', 'admin'].forEach(function (name) {
+    var marker = { index: 'App.boot', styles: '--primary', components: 'function apiCall', scripts: 'var App', login: 'var Login',
+      employee: 'var Employee', kitchen: "Desk.register('k-dashboard'", admin: "Desk.register('a-dashboard'" }[name];
+    try {
+      var content = HtmlService.createHtmlOutputFromFile(name).getContent();
+      if (content.indexOf(marker) < 0) { problems++; lines.push('❌ ' + name + '.html มีเนื้อหาผิดไฟล์'); }
+      else lines.push('✅ ' + name + '.html');
+    } catch (e) { problems++; lines.push('❌ ' + name + '.html ไม่มีไฟล์'); }
+  });
+  lines.push(problems ? '⚠️ พบปัญหา ' + problems + ' ไฟล์ — วางเนื้อหาใหม่ให้ตรงชื่อไฟล์ แล้วรัน checkInstallation() อีกครั้ง' : '🎉 ติดตั้งครบถูกต้อง พร้อมรัน setupDatabase()');
+  Logger.log(lines.join('\n'));
+  return { ok: !problems, problems: problems, report: lines };
+}
